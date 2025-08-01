@@ -7,6 +7,7 @@ const message = ref('Voice Transcription');
 const isRecording = ref(false);
 const isProcessing = ref(false); // To give user feedback during API call
 const transcript = ref('');
+const aiResponse = ref('');
 let recognition = null; // Will hold the SpeechRecognition instance
 const recognitionSupported = ref(true);
 
@@ -18,6 +19,7 @@ const toggleRecording = () => {
     recognition.stop();
   } else {
     transcript.value = ''; // Clear previous transcript before starting
+    aiResponse.value = ''; // Clear previous AI response
     recognition.start();
   }
 };
@@ -30,10 +32,10 @@ const sendPromptToBackend = async () => {
     const response = await axios.post('http://127.0.0.1:5000/api/prompt', {
       text: transcript.value,
     });
-    console.log('Backend response:', response.data);
-    // You could update the UI with the response here if needed
+    console.log('AI response:', response.data);
+    aiResponse.value = response.data.response_text;
   } catch (error) {
-    console.error('Error sending prompt to backend:', error);
+    console.error('Error getting AI response:', error);
   } finally {
     isProcessing.value = false;
   }
@@ -100,6 +102,10 @@ onBeforeUnmount(() => {
       <h2>Transcript:</h2>
       <p>{{ transcript }}</p>
     </div>
+    <div class="ai-response-container" v-if="aiResponse">
+      <h2>AI Response:</h2>
+      <p>{{ aiResponse }}</p>
+    </div>
   </div>
 </template>
 
@@ -129,6 +135,17 @@ onBeforeUnmount(() => {
   margin-top: 20px;
   padding: 15px;
   border: 1px solid #ddd;
+  border-radius: 8px;
+  text-align: left;
+  max-width: 600px;
+  margin-left: auto;
+  margin-right: auto;
+}
+.ai-response-container {
+  margin-top: 20px;
+  padding: 15px;
+  border: 1px solid #2ecc71;
+  background-color: #f0fff4;
   border-radius: 8px;
   text-align: left;
   max-width: 600px;
