@@ -1,22 +1,41 @@
 <script setup>
 import { ref, onMounted, onBeforeUnmount } from 'vue';
+import axios from 'axios';
 
 // --- State ---
 const message = ref('Voice Transcription');
 const isRecording = ref(false);
+const isProcessing = ref(false); // To give user feedback during API call
 const transcript = ref('');
 let recognition = null; // Will hold the SpeechRecognition instance
 const recognitionSupported = ref(true);
 
 // --- Methods ---
 const toggleRecording = () => {
-  if (!recognition) return;
+  if (!recognition || isProcessing.value) return;
 
   if (isRecording.value) {
     recognition.stop();
   } else {
     transcript.value = ''; // Clear previous transcript before starting
     recognition.start();
+  }
+};
+
+const sendPromptToBackend = async () => {
+  if (!transcript.value.trim()) return; // Don't send empty transcripts
+
+  isProcessing.value = true;
+  try {
+    const response = await axios.post('http://127.0.0.1:5000/api/prompt', {
+      text: transcript.value,
+    });
+    console.log('Backend response:', response.data);
+    // You could update the UI with the response here if needed
+  } catch (error) {
+    console.error('Error sending prompt to backend:', error);
+  } finally {
+    isProcessing.value = false;
   }
 };
 
@@ -41,6 +60,8 @@ onMounted(() => {
   // onend is the primary event for when the service is truly done.
   recognition.onend = () => {
     isRecording.value = false;
+    // Send the final prompt to the backend
+    sendPromptToBackend();
   };
 
   recognition.onerror = (event) => {
@@ -68,8 +89,8 @@ onBeforeUnmount(() => {
   <div id="app">
     <h1>{{ message }}</h1>
     <div class="transcription-controls">
-      <button @click="toggleRecording" :disabled="!recognitionSupported">
-        {{ isRecording ? 'Stop Recording' : 'Start Recording' }}
+      <button @click="toggleRecording" :disabled="!recognitionSupported || isProcessing">
+        {{ isRecording ? 'Stop Recording' : (isProcessing ? 'Processing...' : 'Start Recording') }}
       </button>
       <p v-if="!recognitionSupported" class="support-error">
         Speech recognition is not supported in your browser.
@@ -98,6 +119,10 @@ onBeforeUnmount(() => {
   padding: 10px 20px;
   font-size: 16px;
   cursor: pointer;
+}
+.transcription-controls button:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
 }
 
 .transcript-container {
