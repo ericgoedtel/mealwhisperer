@@ -13,6 +13,8 @@ load_dotenv()
 DB_FILE = 'meals.db'
 
 LATEST_SCHEMA_VERSION = 4
+# Read model name from environment variable with a sensible default
+GEMINI_MODEL_NAME = os.getenv('GEMINI_MODEL_NAME', 'gemini-1.5-flash')
 
 def _run_migration_v2(cursor):
     """
@@ -367,7 +369,7 @@ def handle_initial_prompt(data):
 
     try:
         model = genai.GenerativeModel(
-            'gemini-1.5-flash',
+            GEMINI_MODEL_NAME,
             system_instruction=SYSTEM_INSTRUCTION
         )
         response = model.generate_content(prompt_text)
