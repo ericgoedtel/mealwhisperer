@@ -166,11 +166,40 @@ const editQuantity = (entry) => {
   });
 };
 
-const cancelEdit = () => {
-  // For now, this simply reverts the UI back to the display state.
-  // In the next step, this will become the save function.
+const getApiDateString = (dateObj) => {
+  const year = dateObj.getFullYear();
+  const month = String(dateObj.getMonth() + 1).padStart(2, '0'); // Months are 0-indexed
+  const day = String(dateObj.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+};
+
+const saveQuantity = async (entry) => {
+  if (editingEntryId.value === null) return; // Avoids re-saving on blur after enter
+
+  const originalQuantity = entry.quantity;
+  const newQuantity = Number(editingQuantity.value);
+
+  // Reset editing state immediately for better UX
   editingEntryId.value = null;
   editingQuantity.value = null;
+
+  // Validate and check for changes before making an API call
+  if (isNaN(newQuantity) || newQuantity < 1 || newQuantity > 100 || newQuantity === originalQuantity) {
+    console.log("Validation failed or no change, reverting.");
+    return;
+  }
+
+  try {
+    const dateString = getApiDateString(viewedDate.value);
+    await axios.patch(`http://127.0.0.1:5000/api/logs/${dateString}/entry/${entry.id}`, {
+      quantity: newQuantity,
+    });
+    // Refresh the entire log to get updated totals
+    await fetchDailyLog();
+  } catch (error) {
+    console.error("Error updating quantity:", error);
+    alert("Failed to update quantity. Please try again.");
+  }
 };
 
 const fetchDailyLog = async () => {
@@ -178,12 +207,7 @@ const fetchDailyLog = async () => {
     console.log("Attempting to fetch daily log...");
     // Correctly get the local date, not the UTC date from toISOString().
     // This prevents timezone-related off-by-one-day errors.
-    const dateToFetch = viewedDate.value;
-    const year = dateToFetch.getFullYear();
-    const month = String(dateToFetch.getMonth() + 1).padStart(2, '0'); // Months are 0-indexed
-    const day = String(dateToFetch.getDate()).padStart(2, '0');
-    const dateString = `${year}-${month}-${day}`;
-
+    const dateString = getApiDateString(viewedDate.value);
     const response = await axios.get(`http://127.0.0.1:5000/api/logs/${dateString}`);
     console.log("Successfully fetched data from backend:", response.data);
     dailyLog.value = response.data; // Always set the data
@@ -311,9 +335,9 @@ onBeforeUnmount(() => {
                   :id="`qty-input-${entry.id}`"
                   type="number"
                   v-model="editingQuantity"
-                  @blur="cancelEdit"
-                  @keyup.enter="cancelEdit"
-                  @keyup.esc="cancelEdit"
+                  @blur="saveQuantity(entry)"
+                  @keyup.enter="saveQuantity(entry)"
+                  @keyup.esc="editingEntryId = null; editingQuantity = null;"
                   class="qty-input"
                 />
                 <span v-else @click="editQuantity(entry)" class="qty-display">
