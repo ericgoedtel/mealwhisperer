@@ -235,10 +235,11 @@ def get_logs_for_date(meal_date):
             """
             SELECT
                 ml.id,
+                f.id as food_id,
                 ml.meal,
                 ml.quantity,
-                ml.total_calories,
-                f.name as food
+                f.name as food,
+                f.calories as per_item_calories
             FROM meal_logs ml
             JOIN foods f ON ml.food_id = f.id
             WHERE ml.meal_date = ?
@@ -255,11 +256,12 @@ def get_logs_for_date(meal_date):
 
         for row in rows:
             meal_type = row['meal']
-            calories = row['total_calories'] or 0 # Default to 0 if calories is None
+            # Calculate total calories for this entry based on the canonical value
+            entry_total_calories = (row['per_item_calories'] or 0) * row['quantity']
 
-            meals_data[meal_type]['entries'].append(dict(row))
-            meals_data[meal_type]['total_meal_calories'] += calories
-            total_daily_calories += calories
+            meals_data[meal_type]['entries'].append({**dict(row), 'total_calories': entry_total_calories})
+            meals_data[meal_type]['total_meal_calories'] += entry_total_calories
+            total_daily_calories += entry_total_calories
 
         return jsonify({
             'total_daily_calories': total_daily_calories,
@@ -511,6 +513,31 @@ def handle_prompt():
         return handle_meal_clarification(data)
 
     return jsonify({'error': 'Invalid request payload'}), 400
+
+@app.route('/api/foods/<int:food_id>', methods=['PATCH'])
+def update_food_entry(food_id):
+    """Updates a canonical food entry's calorie count."""
+    data = request.get_json()
+    if not data or 'calories' not in data:
+        return jsonify({'error': 'Missing calories in request body.'}), 400
+
+    try:
+        new_calories = int(data['calories'])
+        if not (0 <= new_calories <= 5000): # A reasonable limit for per-item calories
+            return jsonify({'error': 'Calories must be between 0 and 5000.'}), 400
+    except (ValueError, TypeError):
+        return jsonify({'error': 'Invalid calories format.'}), 400
+
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        cursor.execute("UPDATE foods SET calories = ? WHERE id = ?", (new_calories, food_id))
+        conn.commit()
+        conn.close()
+        return jsonify({'status': 'success', 'message': f'Food entry {food_id} updated.'})
+    except sqlite3.Error as e:
+        print(f"DATABASE ERROR on food UPDATE: {e}")
+        return jsonify({'error': 'Could not update food entry.'}), 500
 
 @app.route('/api/logs/<string:meal_date>/entry/<int:log_id>', methods=['PATCH'])
 def update_log_entry(meal_date, log_id):
