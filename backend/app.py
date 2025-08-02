@@ -593,6 +593,37 @@ def update_log_entry(meal_date, log_id):
         if conn:
             conn.close()
 
+@app.route('/api/logs/<string:meal_date>/entry/<int:log_id>', methods=['DELETE'])
+def delete_log_entry(meal_date, log_id):
+    """Deletes a specific log entry."""
+    try:
+        # Validate that the provided string is a valid date in YYYY-MM-DD format
+        date.fromisoformat(meal_date)
+    except (ValueError, TypeError):
+        return jsonify({'error': 'Invalid date format in URL. Use YYYY-MM-DD.'}), 400
+
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+
+        # Optional but good practice: Check if the entry exists and belongs to the date before deleting
+        cursor.execute("SELECT id FROM meal_logs WHERE id = ? AND meal_date = ?", (log_id, meal_date))
+        entry = cursor.fetchone()
+
+        if not entry:
+            return jsonify({'error': 'Log entry not found or does not belong to the specified date.'}), 404
+
+        # Delete the entry
+        cursor.execute("DELETE FROM meal_logs WHERE id = ?", (log_id,))
+        conn.commit()
+        return jsonify({'status': 'success', 'message': f'Log entry {log_id} deleted.'})
+    except sqlite3.Error as e:
+        print(f"DATABASE ERROR on DELETE: {e}")
+        return jsonify({'error': 'Could not delete log entry.'}), 500
+    finally:
+        if conn:
+            conn.close()
+
 if __name__ == '__main__':
     init_db()
     app.run(debug=True)

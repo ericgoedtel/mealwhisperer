@@ -197,21 +197,31 @@ const saveQuantity = async (entry) => {
   editingQuantity.value = null;
 
   // Validate and check for changes before making an API call
-  if (isNaN(newQuantity) || newQuantity < 1 || newQuantity > 100 || newQuantity === originalQuantity) {
+  // Allow 0 for deletion, but no negative numbers.
+  if (isNaN(newQuantity) || newQuantity < 0 || newQuantity > 100 || newQuantity === originalQuantity) {
     console.log("Validation failed or no change, reverting.");
     return;
   }
 
   try {
     const dateString = getApiDateString(viewedDate.value);
-    await axios.patch(`http://127.0.0.1:5000/api/logs/${dateString}/entry/${entry.id}`, {
-      quantity: newQuantity,
-    });
+    const url = `http://127.0.0.1:5000/api/logs/${dateString}/entry/${entry.id}`;
+
+    if (newQuantity === 0) {
+      // Perform a DELETE request
+      await axios.delete(url);
+    } else {
+      // Perform a PATCH request to update
+      await axios.patch(url, {
+        quantity: newQuantity,
+      });
+    }
+
     // Refresh the entire log to get updated totals
     await fetchDailyLog();
   } catch (error) {
     console.error("Error updating quantity:", error);
-    alert("Failed to update quantity. Please try again.");
+    alert("Failed to update entry. Please try again.");
   }
 };
 
@@ -401,6 +411,8 @@ onBeforeUnmount(() => {
                   v-if="editingEntryId === entry.id"
                   :id="`qty-input-${entry.id}`"
                   type="number"
+                  min="0"
+                  max="100"
                   v-model="editingQuantity"
                   @blur="saveQuantity(entry)"
                   @keyup.enter="saveQuantity(entry)"
