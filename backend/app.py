@@ -2,10 +2,81 @@ import os
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 import json
+import sqlite3
 from dotenv import load_dotenv
+from datetime import date, timedelta
 import google.generativeai as genai
 
 load_dotenv()
+
+DB_FILE = 'meals.db'
+
+LATEST_SCHEMA_VERSION = 2
+
+def _run_migration_v2(cursor):
+    """
+    Migration v2:
+    1. Renames 'timestamp' to 'log_timestamp' for clarity.
+    2. Adds the 'meal_date' column to store when the meal was eaten.
+    """
+    try:
+        cursor.execute("PRAGMA table_info(meal_logs)")
+        columns = [row[1] for row in cursor.fetchall()]
+
+        if 'timestamp' in columns and 'log_timestamp' not in columns:
+            cursor.execute("ALTER TABLE meal_logs RENAME COLUMN timestamp TO log_timestamp")
+            print("Migration v2: Renamed 'timestamp' to 'log_timestamp'.")
+
+        if 'meal_date' not in columns:
+            cursor.execute("ALTER TABLE meal_logs ADD COLUMN meal_date DATE")
+            print("Migration v2: Added 'meal_date' column.")
+
+    except sqlite3.Error as e:
+        print(f"Error applying migration v2: {e}")
+        raise # Re-raise to ensure the transaction is rolled back
+
+def init_db():
+    """Initializes and migrates the database to the latest version."""
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+
+    try:
+        # Get current schema version using SQLite's built-in pragma
+        cursor.execute("PRAGMA user_version")
+        current_version = cursor.fetchone()[0]
+        print(f"Database version: {current_version}")
+
+        if current_version < 1:
+            print("Applying schema v1 (initial setup)...")
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS meal_logs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    food TEXT NOT NULL,
+                    meal TEXT NOT NULL,
+                    quantity INTEGER NOT NULL,
+                    total_calories INTEGER
+                )
+            ''')
+            cursor.execute(f"PRAGMA user_version = 1")
+            current_version = 1
+            print("Schema v1 applied.")
+
+        if current_version < 2:
+            print("Applying schema v2...")
+            _run_migration_v2(cursor)
+            cursor.execute(f"PRAGMA user_version = 2")
+            print("Schema v2 applied.")
+
+        if current_version == LATEST_SCHEMA_VERSION:
+            print("Database is up to date.")
+
+        conn.commit()
+    except sqlite3.Error as e:
+        print(f"DATABASE MIGRATION ERROR: {e}")
+        conn.rollback()
+    finally:
+        conn.close()
 
 # instantiate the app
 app = Flask(__name__)
@@ -27,6 +98,7 @@ def perform_readback_or_confirmation(details):
     food = details.get('food', 'unknown')
     meal = details.get('meal', 'unknown')
     quantity = details.get('quantity', 1)
+    meal_date_str = details.get('meal_date')
     per_item_calories = details.get('calories')
 
     calorie_text = ""
@@ -39,6 +111,22 @@ def perform_readback_or_confirmation(details):
         except (ValueError, TypeError):
             # If calories or quantity aren't valid numbers, just skip the text
             calorie_text = ""
+    
+    date_text = ""
+    if meal_date_str:
+        try:
+            meal_date_obj = date.fromisoformat(meal_date_str)
+            today = date.today()
+            yesterday = today - timedelta(days=1)
+
+            if meal_date_obj == today:
+                date_text = "" # Default, no extra text
+            elif meal_date_obj == yesterday:
+                date_text = " yesterday"
+            else:
+                date_text = f" on {meal_date_obj.strftime('%A, %B %d')}"
+        except (ValueError, TypeError):
+            date_text = "" # If date is malformed, just ignore it
 
     # --- SANITY CHECK & READBACK ---
     if quantity > 6:
@@ -48,7 +136,7 @@ def perform_readback_or_confirmation(details):
             'status': 'success',
             'action': 'explicit_confirmation_required',
             'details': details,
-            'response_text': f"Did you really have {quantity} {food}{calorie_text}? Please confirm to log."
+            'response_text': f"Did you really have {quantity} {food}{date_text}{calorie_text}? Please confirm to log."
         })
     else:
         # For normal quantities, do the standard readback with auto-confirmation.
@@ -57,7 +145,7 @@ def perform_readback_or_confirmation(details):
             'status': 'success',
             'action': 'readback_required',
             'details': details,
-            'response_text': f"Got it: {quantity} {food} for {meal}{calorie_text}. I'll log this in a moment unless you cancel."
+            'response_text': f"Got it: {quantity} {food} for {meal}{date_text}{calorie_text}. I'll log this in a moment unless you cancel."
         })
 
 def handle_confirmed_log(data):
@@ -66,13 +154,27 @@ def handle_confirmed_log(data):
     food = details.get('food', 'unknown')
     meal = details.get('meal', 'unknown')
     quantity = details.get('quantity', 1)
+    meal_date = details.get('meal_date') # This will be a string 'YYYY-MM-DD'
     total_calories = details.get('total_calories') # Get the pre-calculated total
 
     calorie_text = ""
     if total_calories is not None:
         calorie_text = f" for a total of {total_calories} calories"
 
-    # This is where you would persist the data to a database.
+    # --- Persist data to the database ---
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO meal_logs (meal_date, food, meal, quantity, total_calories) VALUES (?, ?, ?, ?, ?)",
+            (meal_date, food, meal, quantity, total_calories)
+        )
+        conn.commit()
+        conn.close()
+    except sqlite3.Error as e:
+        print(f"DATABASE ERROR on INSERT: {e}")
+        # We can still return a success response to the user even if DB write fails
+
     print(f"CONFIRMED: Logging {quantity} '{food}' for '{meal}'{calorie_text}.")
 
     return jsonify({
@@ -91,7 +193,9 @@ def handle_initial_prompt(data):
     system_instruction = """
     You are a meal logging assistant. Your primary function is to identify when a user wants to log a meal.
     If the user's request is to log a food item, respond ONLY with a JSON object in the following format:
-    {"action": "log_meal", "details": {"food": "...", "meal": "...", "quantity": ..., "calories": ...}}
+    {"action": "log_meal", "details": {"food": "...", "meal": "...", "quantity": ..., "calories": ..., "meal_date": "YYYY-MM-DD"}}
+
+    Also, determine the date the meal was eaten from the user's prompt (e.g., "today", "yesterday"). Convert this to a "YYYY-MM-DD" format and include it in the "meal_date" field. If no date is mentioned, assume it is for today and provide today's date.
 
     The "meal" field MUST be one of "breakfast", "lunch", "dinner", or "snack". If the user does not specify a valid meal, set the "meal" field to null. Do not guess a meal or use values like "other".
 
@@ -128,10 +232,16 @@ def handle_initial_prompt(data):
                 details = response_data.get('details', {})
                 food = details.get('food', 'unknown')
                 meal = details.get('meal') # Use default None to correctly trigger the check below
+                meal_date_str = details.get('meal_date')
                 quantity = details.get('quantity')
                 if quantity is None:
                     quantity = 1
                 
+                # Default to today's date if the model doesn't provide one
+                if not meal_date_str:
+                    meal_date_str = date.today().isoformat()
+                details['meal_date'] = meal_date_str
+
                 details['quantity'] = quantity
 
                 valid_meals = ["breakfast", "lunch", "dinner", "snack"]
@@ -201,4 +311,5 @@ def handle_prompt():
     return jsonify({'error': 'Invalid request payload'}), 400
 
 if __name__ == '__main__':
+    init_db()
     app.run(debug=True)

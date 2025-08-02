@@ -38,3 +38,6 @@ yarn-error.log*
 .env
 .env.*
 !.env.example
+
+# Local Databases
+*.db
