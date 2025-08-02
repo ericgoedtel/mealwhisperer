@@ -4,6 +4,7 @@ from flask_cors import CORS
 import json
 import sqlite3
 from dotenv import load_dotenv
+from collections import defaultdict
 from datetime import date, timedelta
 import google.generativeai as genai
 
@@ -11,7 +12,7 @@ load_dotenv()
 
 DB_FILE = 'meals.db'
 
-LATEST_SCHEMA_VERSION = 2
+LATEST_SCHEMA_VERSION = 3
 
 def _run_migration_v2(cursor):
     """
@@ -30,10 +31,49 @@ def _run_migration_v2(cursor):
         if 'meal_date' not in columns:
             cursor.execute("ALTER TABLE meal_logs ADD COLUMN meal_date DATE")
             print("Migration v2: Added 'meal_date' column.")
+            cursor.execute("UPDATE meal_logs SET meal_date = date(log_timestamp) WHERE meal_date IS NULL")
+            print("Migration v2: Backfilled 'meal_date' for existing rows.")
 
     except sqlite3.Error as e:
         print(f"Error applying migration v2: {e}")
         raise # Re-raise to ensure the transaction is rolled back
+
+def _run_migration_v3(cursor):
+    """
+    Migration v3:
+    1. Changes 'log_timestamp' from DATETIME string to INTEGER (Unix epoch).
+    """
+    try:
+        # The 'rebuild table' approach is the safest way to change column types and defaults in SQLite
+        cursor.execute('''
+            CREATE TABLE meal_logs_new (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                log_timestamp INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
+                meal_date DATE NOT NULL,
+                food TEXT NOT NULL,
+                meal TEXT NOT NULL,
+                quantity INTEGER NOT NULL,
+                total_calories INTEGER
+            )
+        ''')
+        print("Migration v3: Created new temporary table.")
+
+        # Copy data, converting the timestamp
+        cursor.execute('''
+            INSERT INTO meal_logs_new (id, log_timestamp, meal_date, food, meal, quantity, total_calories)
+            SELECT id, strftime('%s', log_timestamp), meal_date, food, meal, quantity, total_calories
+            FROM meal_logs
+        ''')
+        print("Migration v3: Migrated data to new table.")
+
+        cursor.execute("DROP TABLE meal_logs")
+        print("Migration v3: Dropped old table.")
+
+        cursor.execute("ALTER TABLE meal_logs_new RENAME TO meal_logs")
+        print("Migration v3: Renamed new table.")
+    except sqlite3.Error as e:
+        print(f"Error applying migration v3: {e}")
+        raise
 
 def init_db():
     """Initializes and migrates the database to the latest version."""
@@ -68,6 +108,12 @@ def init_db():
             cursor.execute(f"PRAGMA user_version = 2")
             print("Schema v2 applied.")
 
+        if current_version < 3:
+            print("Applying schema v3...")
+            _run_migration_v3(cursor)
+            cursor.execute(f"PRAGMA user_version = 3")
+            print("Schema v3 applied.")
+
         if current_version == LATEST_SCHEMA_VERSION:
             print("Database is up to date.")
 
@@ -92,6 +138,74 @@ try:
 except KeyError:
     print("CRITICAL: GOOGLE_API_KEY environment variable not set. The service will not work.")
 
+SYSTEM_INSTRUCTION = """
+You are a meal logging assistant. Your primary function is to identify when a user wants to log a meal.
+
+If the user's request is to log a food item, respond ONLY with a JSON object in the following format:
+{"action": "log_meal", "details": {"food": "...", "meal": "...", "quantity": ..., "calories": ..., "date_keyword": "..."}}
+
+From the user's prompt, extract a date reference keyword.
+- If the user says "today" or does not mention a date, set "date_keyword" to "today".
+- If the user says "yesterday", set "date_keyword" to "yesterday".
+- If the user mentions any other date phrase (e.g., "last Tuesday", "October 27th"), set "date_keyword" to that exact phrase (e.g., "last Tuesday").
+
+Do NOT calculate the final date yourself. Just return the keyword or phrase.
+
+The "meal" field MUST be one of "breakfast", "lunch", "dinner", or "snack". If the user does not specify a valid meal, set the "meal" field to null. Do not guess a meal or use values like "other".
+
+Also, estimate the calories for a SINGLE UNIT of the food item and include it in the "calories" field as a number. For example, for "2 eggs", provide the calories for one egg.
+
+The "quantity" is the number describing how many of the food item were eaten. It is usually found right before the food name.
+If multiple numbers are present, use context to determine the correct quantity. For example, in 'I ate 2 large pizzas on my 30th birthday', the quantity is 2, not 30.
+If the quantity is ambiguous or seems like a transcription error (e.g., '5 817 eggs'), choose the most plausible number that modifies the food item.
+If no quantity is mentioned, you can omit the field as the system will default to 1.
+
+Your response for a log_meal action MUST be ONLY the raw JSON object itself, with no surrounding text, explanation, or markdown code fences (like ```json).
+
+If the user's request is anything else (e.g., a question, a greeting, a general command), respond conversationally as a helpful assistant.
+"""
+
+@app.route('/api/logs/<string:meal_date>', methods=['GET'])
+def get_logs_for_date(meal_date):
+    """Retrieves and groups all meal logs for a specific date."""
+    try:
+        # Validate that the provided string is a valid date in YYYY-MM-DD format
+        date.fromisoformat(meal_date)
+    except (ValueError, TypeError):
+        return jsonify({'error': 'Invalid date format. Use YYYY-MM-DD.'}), 400
+
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        # Make the connection return rows that can be accessed by column name
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT meal, food, quantity, total_calories FROM meal_logs WHERE meal_date = ? ORDER BY log_timestamp",
+            (meal_date,)
+        )
+        rows = cursor.fetchall()
+        conn.close()
+
+        # Process the rows into a structured dictionary
+        meals_data = defaultdict(lambda: {'entries': [], 'total_meal_calories': 0})
+        total_daily_calories = 0
+
+        for row in rows:
+            meal_type = row['meal']
+            calories = row['total_calories'] or 0 # Default to 0 if calories is None
+
+            meals_data[meal_type]['entries'].append(dict(row))
+            meals_data[meal_type]['total_meal_calories'] += calories
+            total_daily_calories += calories
+
+        return jsonify({
+            'total_daily_calories': total_daily_calories,
+            'meals': dict(meals_data) # Convert defaultdict to a regular dict for JSON
+        })
+
+    except sqlite3.Error as e:
+        print(f"DATABASE ERROR on SELECT: {e}")
+        return jsonify({'error': 'Could not retrieve meal logs.'}), 500
 
 def perform_readback_or_confirmation(details):
     """Checks quantity and returns the appropriate readback/confirmation action."""
@@ -190,30 +304,10 @@ def handle_initial_prompt(data):
 
     prompt_text = data['text'].strip()
 
-    system_instruction = """
-    You are a meal logging assistant. Your primary function is to identify when a user wants to log a meal.
-    If the user's request is to log a food item, respond ONLY with a JSON object in the following format:
-    {"action": "log_meal", "details": {"food": "...", "meal": "...", "quantity": ..., "calories": ..., "meal_date": "YYYY-MM-DD"}}
-
-    Also, determine the date the meal was eaten from the user's prompt (e.g., "today", "yesterday"). Convert this to a "YYYY-MM-DD" format and include it in the "meal_date" field. If no date is mentioned, assume it is for today and provide today's date.
-
-    The "meal" field MUST be one of "breakfast", "lunch", "dinner", or "snack". If the user does not specify a valid meal, set the "meal" field to null. Do not guess a meal or use values like "other".
-
-    Also, estimate the calories for a SINGLE UNIT of the food item and include it in the "calories" field as a number. For example, for "2 eggs", provide the calories for one egg.
-
-    The "quantity" is the number describing how many of the food item were eaten. It is usually found right before the food name.
-    If multiple numbers are present, use context to determine the correct quantity. For example, in 'I ate 2 large pizzas on my 30th birthday', the quantity is 2, not 30.
-    If the quantity is ambiguous or seems like a transcription error (e.g., '5 817 eggs'), choose the most plausible number that modifies the food item.
-    If no quantity is mentioned, you can omit the field as the system will default to 1.
-
-    Your response for a log_meal action MUST be ONLY the raw JSON object itself, with no surrounding text, explanation, or markdown code fences (like ```json).
-
-    If the user's request is anything else (e.g., a question, a greeting, a general command), respond conversationally as a helpful assistant.
-    """
     try:
         model = genai.GenerativeModel(
             'gemini-1.5-flash',
-            system_instruction=system_instruction
+            system_instruction=SYSTEM_INSTRUCTION
         )
         response = model.generate_content(prompt_text)
 
@@ -232,14 +326,13 @@ def handle_initial_prompt(data):
                 details = response_data.get('details', {})
                 food = details.get('food', 'unknown')
                 meal = details.get('meal') # Use default None to correctly trigger the check below
-                meal_date_str = details.get('meal_date')
+                date_keyword = details.get('date_keyword')
                 quantity = details.get('quantity')
                 if quantity is None:
                     quantity = 1
                 
-                # Default to today's date if the model doesn't provide one
-                if not meal_date_str:
-                    meal_date_str = date.today().isoformat()
+                # Resolve the date keyword into a concrete date string using our reliable Python function.
+                meal_date_str = resolve_meal_date(date_keyword)
                 details['meal_date'] = meal_date_str
 
                 details['quantity'] = quantity
@@ -267,6 +360,22 @@ def handle_initial_prompt(data):
     except Exception as e:
         print(f"Error calling Gemini API: {e}")
         return jsonify({'status': 'error', 'message': 'An error occurred while processing your request.'}), 500
+
+def resolve_meal_date(date_keyword: str) -> str:
+    """
+    Resolves a date keyword from the LLM into a YYYY-MM-DD string.
+    This function is the single source of truth for date calculations.
+    """
+    today = date.today()
+    if not date_keyword or date_keyword.lower() == 'today':
+        return today.isoformat()
+    if date_keyword.lower() == 'yesterday':
+        return (today - timedelta(days=1)).isoformat()
+
+    # Placeholder for a future, more advanced natural language date parser for phrases like "last Tuesday"
+    # For now, if we don't recognize the keyword, we default to today.
+    print(f"Unrecognized date_keyword: '{date_keyword}'. Defaulting to today.")
+    return today.isoformat()
 
 def handle_meal_clarification(data):
     """Handles the user's response to a meal clarification prompt."""

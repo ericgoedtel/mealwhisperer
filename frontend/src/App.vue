@@ -1,17 +1,28 @@
 <script setup>
-import { ref, onMounted, onBeforeUnmount } from 'vue';
+import { ref, onMounted, onBeforeUnmount, computed } from 'vue';
 import axios from 'axios';
 
 // --- State ---
-const message = ref('Voice Transcription');
 const isRecording = ref(false);
 const isProcessing = ref(false); // To give user feedback during API call
 const transcript = ref('');
 const aiResponse = ref('');
 const confirmationState = ref(null); // Holds { action, details } for any pending action
+const dailyLog = ref(null);
+const viewedDate = ref(new Date()); // The date currently being viewed by the user
 let confirmationTimer = null; // Holds the timeout ID
 let recognition = null; // Will hold the SpeechRecognition instance
 const recognitionSupported = ref(true);
+
+const formattedViewedDate = computed(() => {
+  // Provides a user-friendly, locale-aware string for the date header
+  return viewedDate.value.toLocaleDateString(undefined, {
+    year: 'numeric',
+    month: 'long',
+    day: 'numeric',
+    weekday: 'long',
+  });
+});
 
 // --- Methods ---
 const toggleRecording = () => {
@@ -75,6 +86,10 @@ const confirmLog = async () => {
     });
     console.log('Confirmation response:', response.data);
     aiResponse.value = response.data.response_text;
+    // If the log was finalized, refresh the daily log display
+    if (response.data.action === 'log_finalized') {
+      await fetchDailyLog();
+    }
   } catch (error) {
     console.error('Error confirming log:', error);
     aiResponse.value = 'Sorry, could not confirm the log.';
@@ -129,7 +144,39 @@ const submitMealClarification = async (meal) => {
   }
 };
 
-onMounted(() => {
+const changeDate = (days) => {
+  const newDate = new Date(viewedDate.value);
+  newDate.setDate(newDate.getDate() + days);
+  viewedDate.value = newDate;
+  fetchDailyLog(); // Fetch data for the new date
+};
+
+const fetchDailyLog = async () => {
+  try {
+    console.log("Attempting to fetch daily log...");
+    // Correctly get the local date, not the UTC date from toISOString().
+    // This prevents timezone-related off-by-one-day errors.
+    const dateToFetch = viewedDate.value;
+    const year = dateToFetch.getFullYear();
+    const month = String(dateToFetch.getMonth() + 1).padStart(2, '0'); // Months are 0-indexed
+    const day = String(dateToFetch.getDate()).padStart(2, '0');
+    const dateString = `${year}-${month}-${day}`;
+
+    const response = await axios.get(`http://127.0.0.1:5000/api/logs/${dateString}`);
+    console.log("Successfully fetched data from backend:", response.data);
+    dailyLog.value = response.data; // Always set the data
+
+    if (response.data && Object.keys(response.data.meals).length > 0) {
+      console.log("Log contains meals. Displaying table.");
+    } else {
+      console.log("Log is empty or contains no meals. Displaying 'no meals' message.");
+    }
+  } catch (error) {
+    console.error("Error fetching today's log:", error);
+  }
+};
+
+onMounted(async () => {
   // Initialize Speech Recognition API
   const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
   if (!SpeechRecognition) {
@@ -165,6 +212,9 @@ onMounted(() => {
       .map(result => result[0].transcript)
       .join('');
   };
+
+  // Fetch initial log data when the component mounts
+  await fetchDailyLog();
 });
 
 // Clean up the recognition service when the component is unmounted
@@ -178,7 +228,6 @@ onBeforeUnmount(() => {
 
 <template>
   <div id="app">
-    <h1>{{ message }}</h1>
     <div class="transcription-controls">
       <button @click="toggleRecording" :disabled="!recognitionSupported || isProcessing">
         {{ isRecording ? 'Stop Recording' : (isProcessing ? 'Processing...' : 'Start Recording') }}
@@ -212,6 +261,37 @@ onBeforeUnmount(() => {
         <template v-else>
           <button @click="cancelLog" class="cancel-button">Cancel</button>
         </template>
+      </div>
+    </div>
+    <div class="daily-log-container" v-if="dailyLog">
+      <div class="date-navigation">
+        <button @click="changeDate(-1)" class="nav-button">&lt;</button>
+        <h2 class="date-header">{{ formattedViewedDate }}</h2>
+        <button @click="changeDate(1)" class="nav-button">&gt;</button>
+      </div>
+      <h3 class="daily-total">Total: {{ dailyLog.total_daily_calories }} calories</h3>
+      <div class="meal-swimlanes" v-if="Object.keys(dailyLog.meals).length > 0">
+        <div v-for="(mealData, mealName) in dailyLog.meals" :key="mealName" class="meal-lane">
+          <h3 class="meal-header">
+            <span>{{ mealName }}</span>
+            <span class="meal-total">{{ mealData.total_meal_calories }} calories</span>
+          </h3>
+          <div class="meal-entries">
+            <div class="entry-row header-row">
+              <div class="col-qty">Qty</div>
+              <div class="col-food">Food</div>
+              <div class="col-cals">Calories</div>
+            </div>
+            <div v-for="(entry, index) in mealData.entries" :key="index" class="entry-row">
+              <div class="col-qty">{{ entry.quantity }}</div>
+              <div class="col-food">{{ entry.food }}</div>
+              <div class="col-cals">{{ entry.total_calories || 0 }}</div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div v-else class="empty-log-message">
+        <p>No meals logged for today. Start by recording what you ate!</p>
       </div>
     </div>
   </div>
@@ -279,7 +359,102 @@ onBeforeUnmount(() => {
   background-color: #e74c3c;
   color: white;
 }
+.daily-log-container {
+  max-width: 600px;
+  margin: 40px auto;
+  text-align: left;
+}
+
+.date-navigation {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 10px;
+}
+
+.date-header {
+  font-size: 1.2em;
+  color: #333;
+  margin: 0;
+}
+
+.nav-button {
+  background: none;
+  border: 1px solid #ccc;
+  border-radius: 50%;
+  width: 30px;
+  height: 30px;
+  cursor: pointer;
+}
+
+.daily-total {
+  text-align: center;
+  font-size: 1.5em;
+  margin-bottom: 20px;
+  color: #2c3e50;
+}
+
+.meal-swimlanes {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.meal-lane {
+  border: 1px solid #e0e0e0;
+  border-radius: 8px;
+  overflow: hidden;
+  background-color: #fff;
+  box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+}
+
+.meal-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px 15px;
+  background-color: #f8f9fa;
+  font-size: 1.1em;
+  text-transform: capitalize;
+  border-bottom: 1px solid #e0e0e0;
+}
+
+.meal-total {
+  font-weight: normal;
+  font-size: 0.9em;
+  color: #555;
+}
+
+.entry-row {
+  display: grid;
+  grid-template-columns: 50px 1fr 80px;
+  gap: 10px;
+  padding: 8px 15px;
+  align-items: center;
+}
+
+.entry-row:not(:last-child) {
+  border-bottom: 1px solid #f1f3f5;
+}
+
+.header-row {
+  font-weight: bold;
+  color: #333;
+  padding-top: 12px;
+  padding-bottom: 12px;
+}
+
+.col-qty { background-color: #eaf2f8; padding: 5px; border-radius: 4px; text-align: center; }
+.col-food { background-color: #e8f6f3; padding: 5px; border-radius: 4px; }
+.col-cals { background-color: #fdedec; padding: 5px; border-radius: 4px; text-align: right; }
 .support-error {
   color: #c0392b;
+}
+.empty-log-message {
+  text-align: center;
+  padding: 20px;
+  background-color: #f8f9fa;
+  border-radius: 8px;
+  color: #6c757d;
 }
 </style>
