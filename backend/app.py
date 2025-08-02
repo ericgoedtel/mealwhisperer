@@ -22,6 +22,32 @@ except KeyError:
     print("CRITICAL: GOOGLE_API_KEY environment variable not set. The service will not work.")
 
 
+def perform_readback_or_confirmation(details):
+    """Checks quantity and returns the appropriate readback/confirmation action."""
+    food = details.get('food', 'unknown')
+    meal = details.get('meal', 'unknown')
+    quantity = details.get('quantity', 1)
+
+    # --- SANITY CHECK & READBACK ---
+    if quantity > 6:
+        # For high quantities, the readback is a direct question and requires explicit confirmation.
+        print(f"High quantity ({quantity}) detected. Requiring explicit confirmation.")
+        return jsonify({
+            'status': 'success',
+            'action': 'explicit_confirmation_required',
+            'details': details,
+            'response_text': f"Did you really have {quantity} {food}? Please confirm to log."
+        })
+    else:
+        # For normal quantities, do the standard readback with auto-confirmation.
+        print(f"Readback required for: {details}")
+        return jsonify({
+            'status': 'success',
+            'action': 'readback_required',
+            'details': details,
+            'response_text': f"Got it: {quantity} {food} for {meal}. I'll log this in a moment unless you cancel."
+        })
+
 def handle_confirmed_log(data):
     """Handles a request that has been confirmed by the user (or by timeout)."""
     details = data.get('details', {})
@@ -40,7 +66,6 @@ def handle_confirmed_log(data):
 
 def handle_initial_prompt(data):
     """Handles the initial text prompt from the user by calling the AI."""
-    data = request.get_json()
     if not data or 'text' not in data:
         return jsonify({'error': 'No text provided'}), 400
 
@@ -81,32 +106,25 @@ def handle_initial_prompt(data):
             if response_data.get('action') == 'log_meal':
                 details = response_data.get('details', {})
                 food = details.get('food', 'unknown')
-                meal = details.get('meal', 'unknown')
+                meal = details.get('meal') # Use default None to correctly trigger the check below
                 quantity = details.get('quantity')
                 if quantity is None:
                     quantity = 1
                 
                 details['quantity'] = quantity
 
-                # --- SANITY CHECK & READBACK ---
-                if quantity > 6:
-                    # For high quantities, the readback is a direct question and requires explicit confirmation.
-                    print(f"High quantity ({quantity}) detected. Requiring explicit confirmation.")
+                # --- MEAL CHECK ---
+                if not meal:
+                    print(f"Meal is missing for food '{food}'. Asking for clarification.")
                     return jsonify({
                         'status': 'success',
-                        'action': 'explicit_confirmation_required',
+                        'action': 'meal_clarification_required',
                         'details': details,
-                        'response_text': f"Did you really have {quantity} {food}? Please confirm to log."
+                        'response_text': f"Which meal was the {food} for? (e.g., breakfast, lunch, dinner, snack)"
                     })
-                else:
-                    # For normal quantities, do the standard readback with auto-confirmation.
-                    print(f"Readback required for: {details}")
-                    return jsonify({
-                        'status': 'success',
-                        'action': 'readback_required',
-                        'details': details,
-                        'response_text': f"Got it: {quantity} {food} for {meal}. I'll log this in a moment unless you cancel."
-                    })
+                
+                # If meal is present, proceed to readback/confirmation
+                return perform_readback_or_confirmation(details)
 
         except (json.JSONDecodeError, AttributeError):
             # If it's not our specific JSON, treat it as a standard text response
@@ -116,6 +134,25 @@ def handle_initial_prompt(data):
         print(f"Error calling Gemini API: {e}")
         return jsonify({'status': 'error', 'message': 'An error occurred while processing your request.'}), 500
 
+def handle_meal_clarification(data):
+    """Handles the user's response to a meal clarification prompt."""
+    details = data.get('details')
+    meal_clarification = data.get('meal', '').lower().strip()
+    valid_meals = ["breakfast", "lunch", "dinner", "snack"]
+
+    if meal_clarification not in valid_meals:
+        print(f"Invalid meal clarification: '{meal_clarification}'. Cancelling log.")
+        return jsonify({
+            'status': 'error',
+            'action': 'log_cancelled',
+            'response_text': f"'{meal_clarification}' is not a valid meal. Please try logging again."
+        })
+
+    print(f"Meal clarified to '{meal_clarification}'.")
+    details['meal'] = meal_clarification
+    # The meal is now clarified, proceed to the next step
+    return perform_readback_or_confirmation(details)
+
 @app.route('/api/prompt', methods=['POST'])
 def handle_prompt():
     """Main route to handle all prompt-related requests."""
@@ -123,14 +160,19 @@ def handle_prompt():
     if not data:
         return jsonify({'error': 'No data provided'}), 400
 
-    prompt_text = data.get('text')
-    if prompt_text is not None:
+    # Route to the correct handler based on the request payload
+    if 'text' in data:
+        prompt_text = data.get('text')
         print(f"Received initial prompt: '{prompt_text.strip()}'")
         return handle_initial_prompt(data)
 
     if data.get('action') == 'confirm_log' and 'details' in data:
         print("Received confirmation to log.")
         return handle_confirmed_log(data)
+
+    if data.get('action') == 'clarify_meal' and 'details' in data and 'meal' in data:
+        print("Received meal clarification.")
+        return handle_meal_clarification(data)
 
     return jsonify({'error': 'Invalid request payload'}), 400
 

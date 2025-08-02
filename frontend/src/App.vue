@@ -8,7 +8,8 @@ const isRecording = ref(false);
 const isProcessing = ref(false); // To give user feedback during API call
 const transcript = ref('');
 const aiResponse = ref('');
-const confirmationState = ref(null); // Holds { action, details } for confirmation
+const confirmationState = ref(null); // Holds { action, details } for any pending action
+const mealClarificationInput = ref(''); // Input for when meal is missing
 let confirmationTimer = null; // Holds the timeout ID
 let recognition = null; // Will hold the SpeechRecognition instance
 const recognitionSupported = ref(true);
@@ -42,7 +43,7 @@ const sendPromptToBackend = async () => {
     aiResponse.value = response_text;
 
     // Handle the response from the backend
-    if (action === 'readback_required' || action === 'explicit_confirmation_required') {
+    if (['readback_required', 'explicit_confirmation_required', 'meal_clarification_required'].includes(action)) {
       confirmationState.value = { action, details };
       if (action === 'readback_required') {
         // Start a 5-second timer to auto-confirm the log.
@@ -86,13 +87,49 @@ const confirmLog = async () => {
 };
 
 const cancelLog = () => {
-  if (confirmationTimer) clearTimeout(confirmationTimer);
+  if (confirmationTimer) clearTimeout(confirmationTimer); // Stop any auto-confirm
   confirmationState.value = null;
   aiResponse.value = "Okay, cancelled.";
   // Briefly show the cancellation message before clearing it.
   setTimeout(() => {
       if (aiResponse.value === "Okay, cancelled.") aiResponse.value = '';
   }, 2000);
+};
+
+const submitMealClarification = async () => {
+  if (!confirmationState.value || !mealClarificationInput.value.trim()) return;
+
+  isProcessing.value = true;
+  const details = confirmationState.value.details;
+  const meal = mealClarificationInput.value.trim();
+  
+  // Clear the input and old state
+  mealClarificationInput.value = '';
+  confirmationState.value = null;
+
+  try {
+    const response = await axios.post('http://127.0.0.1:5000/api/prompt', {
+      action: 'clarify_meal',
+      details: details,
+      meal: meal
+    });
+
+    const { action, details: newDetails, response_text } = response.data;
+    aiResponse.value = response_text;
+
+    // The response will now be a readback, explicit confirmation, or an error.
+    if (action === 'readback_required' || action === 'explicit_confirmation_required') {
+      confirmationState.value = { action, details: newDetails };
+      if (action === 'readback_required') {
+        confirmationTimer = setTimeout(() => { if (confirmationState.value) confirmLog(); }, 5000);
+      }
+    }
+  } catch (error) {
+    console.error('Error submitting meal clarification:', error);
+    aiResponse.value = 'Sorry, an error occurred.';
+  } finally {
+    isProcessing.value = false;
+  }
 };
 
 onMounted(() => {
@@ -161,8 +198,21 @@ onBeforeUnmount(() => {
       <h2>AI Response:</h2>
       <p>{{ aiResponse }}</p>
       <div v-if="confirmationState" class="confirmation-buttons">
-        <button v-if="confirmationState.action === 'explicit_confirmation_required'" @click="confirmLog" :disabled="isProcessing">Yes, Log It</button>
-        <button @click="cancelLog" class="cancel-button">Cancel / No</button>
+        <!-- Explicit confirmation for high quantity -->
+        <template v-if="confirmationState.action === 'explicit_confirmation_required'">
+          <button @click="confirmLog" :disabled="isProcessing">Yes, Log It</button>
+          <button @click="cancelLog" class="cancel-button">No, Cancel</button>
+        </template>
+        <!-- Meal clarification input -->
+        <template v-else-if="confirmationState.action === 'meal_clarification_required'">
+          <input v-model="mealClarificationInput" @keyup.enter="submitMealClarification" placeholder="e.g., breakfast" class="meal-input"/>
+          <button @click="submitMealClarification">Submit</button>
+          <button @click="cancelLog" class="cancel-button">Cancel</button>
+        </template>
+        <!-- Default cancel for auto-confirm readback -->
+        <template v-else>
+          <button @click="cancelLog" class="cancel-button">Cancel</button>
+        </template>
       </div>
     </div>
   </div>
@@ -221,6 +271,13 @@ onBeforeUnmount(() => {
   border: none;
   border-radius: 5px;
 }
+.confirmation-buttons .meal-input {
+  padding: 8px;
+  border: 1px solid #ccc;
+  border-radius: 5px;
+  flex-grow: 1;
+}
+
 .confirmation-buttons button:first-of-type:not(:last-of-type) {
   background-color: #2ecc71;
   color: white;
