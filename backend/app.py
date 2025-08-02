@@ -1,12 +1,19 @@
-import os
-from flask import Flask, jsonify, request
-from flask_cors import CORS
+# pylint: disable=C0301
+
+"""
+This module interfaces a human with a generative AI for the purposes
+of logging nutrition and meals.
+"""
+
 import json
+import os
 import sqlite3
-from dotenv import load_dotenv
 from collections import defaultdict
 from datetime import date, timedelta
 import google.generativeai as genai
+from dotenv import load_dotenv
+from flask import Flask, jsonify, request
+from flask_cors import CORS
 
 load_dotenv()
 
@@ -144,26 +151,26 @@ def init_db():
                     total_calories INTEGER
                 )
             ''')
-            cursor.execute(f"PRAGMA user_version = 1")
+            cursor.execute("PRAGMA user_version = 1")
             current_version = 1
             print("Schema v1 applied.")
 
         if current_version < 2:
             print("Applying schema v2...")
             _run_migration_v2(cursor)
-            cursor.execute(f"PRAGMA user_version = 2")
+            cursor.execute("PRAGMA user_version = 2")
             print("Schema v2 applied.")
 
         if current_version < 3:
             print("Applying schema v3...")
             _run_migration_v3(cursor)
-            cursor.execute(f"PRAGMA user_version = 3")
+            cursor.execute("PRAGMA user_version = 3")
             print("Schema v3 applied.")
 
         if current_version < 4:
             print("Applying schema v4...")
             _run_migration_v4(cursor)
-            cursor.execute(f"PRAGMA user_version = 4")
+            cursor.execute("PRAGMA user_version = 4")
             print("Schema v4 applied.")
 
         if current_version == LATEST_SCHEMA_VERSION:
@@ -291,7 +298,7 @@ def perform_readback_or_confirmation(details):
         except (ValueError, TypeError):
             # If calories or quantity aren't valid numbers, just skip the text
             calorie_text = ""
-    
+
     date_text = ""
     if meal_date_str:
         try:
@@ -318,15 +325,14 @@ def perform_readback_or_confirmation(details):
             'details': details,
             'response_text': f"Did you really have {quantity} {food}{date_text}{calorie_text}? Please confirm to log."
         })
-    else:
-        # For normal quantities, do the standard readback with auto-confirmation.
-        print(f"Readback required for: {details}")
-        return jsonify({
-            'status': 'success',
-            'action': 'readback_required',
-            'details': details,
-            'response_text': f"Got it: {quantity} {food} for {meal}{date_text}{calorie_text}. I'll log this in a moment unless you cancel."
-        })
+    # For normal quantities, do the standard readback with auto-confirmation.
+    print(f"Readback required for: {details}")
+    return jsonify({
+        'status': 'success',
+        'action': 'readback_required',
+        'details': details,
+        'response_text': f"Got it: {quantity} {food} for {meal}{date_text}{calorie_text}. I'll log this in a moment unless you cancel."
+    })
 
 def handle_confirmed_log(data):
     """Handles a request that has been confirmed by the user (or by timeout)."""
@@ -426,7 +432,7 @@ def handle_initial_prompt(data):
                 quantity = details.get('quantity')
                 if quantity is None:
                     quantity = 1
-                
+
                 # Resolve the date keyword into a concrete date string using our reliable Python function.
                 meal_date_str = resolve_meal_date(date_keyword)
                 details['meal_date'] = meal_date_str
@@ -445,7 +451,7 @@ def handle_initial_prompt(data):
                         'details': details,
                         'response_text': f"Which meal was the {food} for? (e.g., breakfast, lunch, dinner, snack)"
                     })
-                
+
                 # If meal is present and valid, proceed to readback/confirmation
                 return perform_readback_or_confirmation(details)
 
@@ -524,7 +530,7 @@ def update_food_entry(food_id):
 
     try:
         new_calories = int(data['calories'])
-        if not (0 <= new_calories <= 5000): # A reasonable limit for per-item calories
+        if not 0 <= new_calories <= 5000: # A reasonable limit for per-item calories
             return jsonify({'error': 'Calories must be between 0 and 5000.'}), 400
     except (ValueError, TypeError):
         return jsonify({'error': 'Invalid calories format.'}), 400
@@ -540,58 +546,70 @@ def update_food_entry(food_id):
         print(f"DATABASE ERROR on food UPDATE: {e}")
         return jsonify({'error': 'Could not update food entry.'}), 500
 
+def _validate_update_log_request(meal_date, request_data) -> tuple[str | None, int | None]:
+    """
+    Validates input for updating a log entry.
+    Returns a tuple of (error_message, new_quantity).
+    """
+    try:
+        date.fromisoformat(meal_date)
+    except (ValueError, TypeError):
+        return 'Invalid date format in URL. Use YYYY-MM-DD.', None
+
+    if not request_data or 'quantity' not in request_data:
+        return 'Missing quantity in request body.', None
+
+    try:
+        new_quantity = int(request_data['quantity'])
+        if not 1 <= new_quantity <= 100:
+            return 'Quantity must be between 1 and 100.', None
+    except (ValueError, TypeError):
+        return 'Invalid quantity format.', None
+
+    return None, new_quantity
+
 @app.route('/api/logs/<string:meal_date>/entry/<int:log_id>', methods=['PATCH'])
 def update_log_entry(meal_date, log_id):
     """Updates a specific log entry, such as its quantity."""
-    try:
-        # Validate that the provided string is a valid date in YYYY-MM-DD format
-        date.fromisoformat(meal_date)
-    except (ValueError, TypeError):
-        return jsonify({'error': 'Invalid date format in URL. Use YYYY-MM-DD.'}), 400
-
     data = request.get_json()
-    if not data or 'quantity' not in data:
-        return jsonify({'error': 'Missing quantity in request body.'}), 400
+    error_message, new_quantity = _validate_update_log_request(meal_date, data)
+    if error_message:
+        return jsonify({'error': error_message}), 400
 
     try:
-        new_quantity = int(data['quantity'])
-        if not (1 <= new_quantity <= 100): # A reasonable limit
-            return jsonify({'error': 'Quantity must be between 1 and 100.'}), 400
-    except (ValueError, TypeError):
-        return jsonify({'error': 'Invalid quantity format.'}), 400
+        with sqlite3.connect(DB_FILE) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
 
-    try:
-        conn = sqlite3.connect(DB_FILE)
-        conn.row_factory = sqlite3.Row
-        cursor = conn.cursor()
+            # Fetch existing entry to validate and get info
+            cursor.execute("SELECT food_id, meal_date FROM meal_logs WHERE id = ?", (log_id,))
+            entry = cursor.fetchone()
+            if not entry:
+                return jsonify({'error': 'Log entry not found.'}), 404
+            if entry['meal_date'] != meal_date:
+                return jsonify({'error': 'Log entry does not belong to the specified date.'}), 400
 
-        # First, fetch the existing entry to validate it
-        cursor.execute("SELECT food_id, meal_date FROM meal_logs WHERE id = ?", (log_id,))
-        entry = cursor.fetchone()
+            # Fetch canonical calories
+            cursor.execute("SELECT calories FROM foods WHERE id = ?", (entry['food_id'],))
+            food_row = cursor.fetchone()
+            if not food_row:
+                return jsonify({'error': 'Associated food item not found, cannot update calories.'}), 500
 
-        if not entry:
-            return jsonify({'error': 'Log entry not found.'}), 404
-        if entry['meal_date'] != meal_date:
-            return jsonify({'error': 'Log entry does not belong to the specified date.'}), 400
+            per_item_calories = food_row[0]
+            new_total_calories = round(per_item_calories * new_quantity)
 
-        # Fetch the canonical calories for the food item to ensure accurate recalculation
-        cursor.execute("SELECT calories FROM foods WHERE id = ?", (entry['food_id'],))
-        food_row = cursor.fetchone()
-        if not food_row:
-            return jsonify({'error': 'Associated food item not found, cannot update calories.'}), 500
-        
-        per_item_calories = food_row[0]
-        new_total_calories = round(per_item_calories * new_quantity)
-        
-        cursor.execute("UPDATE meal_logs SET quantity = ?, total_calories = ? WHERE id = ?", (new_quantity, new_total_calories, log_id))
-        conn.commit()
-        return jsonify({'status': 'success', 'message': f'Log entry {log_id} updated.'})
+            # Update the database
+            cursor.execute(
+                "UPDATE meal_logs SET quantity = ?, total_calories = ? WHERE id = ?",
+                (new_quantity, new_total_calories, log_id)
+            )
+            # The 'with' statement handles the commit on success or rollback on error.
+
     except sqlite3.Error as e:
         print(f"DATABASE ERROR on UPDATE: {e}")
         return jsonify({'error': 'Could not update log entry.'}), 500
-    finally:
-        if conn:
-            conn.close()
+
+    return jsonify({'status': 'success', 'message': f'Log entry {log_id} updated.'})
 
 @app.route('/api/logs/<string:meal_date>/entry/<int:log_id>', methods=['DELETE'])
 def delete_log_entry(meal_date, log_id):
