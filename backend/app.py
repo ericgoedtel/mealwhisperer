@@ -27,6 +27,18 @@ def perform_readback_or_confirmation(details):
     food = details.get('food', 'unknown')
     meal = details.get('meal', 'unknown')
     quantity = details.get('quantity', 1)
+    per_item_calories = details.get('calories')
+
+    calorie_text = ""
+    if per_item_calories is not None:
+        try:
+            # Calculate total calories and add it to the details for the final log
+            total_calories = int(per_item_calories) * int(quantity)
+            details['total_calories'] = total_calories
+            calorie_text = f", which is about {total_calories} calories"
+        except (ValueError, TypeError):
+            # If calories or quantity aren't valid numbers, just skip the text
+            calorie_text = ""
 
     # --- SANITY CHECK & READBACK ---
     if quantity > 6:
@@ -36,7 +48,7 @@ def perform_readback_or_confirmation(details):
             'status': 'success',
             'action': 'explicit_confirmation_required',
             'details': details,
-            'response_text': f"Did you really have {quantity} {food}? Please confirm to log."
+            'response_text': f"Did you really have {quantity} {food}{calorie_text}? Please confirm to log."
         })
     else:
         # For normal quantities, do the standard readback with auto-confirmation.
@@ -45,7 +57,7 @@ def perform_readback_or_confirmation(details):
             'status': 'success',
             'action': 'readback_required',
             'details': details,
-            'response_text': f"Got it: {quantity} {food} for {meal}. I'll log this in a moment unless you cancel."
+            'response_text': f"Got it: {quantity} {food} for {meal}{calorie_text}. I'll log this in a moment unless you cancel."
         })
 
 def handle_confirmed_log(data):
@@ -54,14 +66,19 @@ def handle_confirmed_log(data):
     food = details.get('food', 'unknown')
     meal = details.get('meal', 'unknown')
     quantity = details.get('quantity', 1)
+    total_calories = details.get('total_calories') # Get the pre-calculated total
+
+    calorie_text = ""
+    if total_calories is not None:
+        calorie_text = f" for a total of {total_calories} calories"
 
     # This is where you would persist the data to a database.
-    print(f"CONFIRMED: Logging {quantity} '{food}' for '{meal}'.")
+    print(f"CONFIRMED: Logging {quantity} '{food}' for '{meal}'{calorie_text}.")
 
     return jsonify({
         'status': 'success',
         'action': 'log_finalized',
-        'response_text': f"Done. I've logged {quantity} {food} for {meal}."
+        'response_text': f"Done. I've logged {quantity} {food} for {meal}{calorie_text}."
     })
 
 def handle_initial_prompt(data):
@@ -74,7 +91,9 @@ def handle_initial_prompt(data):
     system_instruction = """
     You are a meal logging assistant. Your primary function is to identify when a user wants to log a meal.
     If the user's request is to log a food item for a specific meal (e.g., "log eggs for breakfast", "I ate 2 sandwiches for lunch"), respond ONLY with a JSON object in the following format:
-    {"action": "log_meal", "details": {"food": "...", "meal": "...", "quantity": ...}}
+    {"action": "log_meal", "details": {"food": "...", "meal": "...", "quantity": ..., "calories": ...}}
+
+    Also, estimate the calories for a SINGLE UNIT of the food item and include it in the "calories" field as a number. For example, for "2 eggs", provide the calories for one egg.
 
     The "quantity" is the number describing how many of the food item were eaten. It is usually found right before the food name.
     If multiple numbers are present, use context to determine the correct quantity. For example, in 'I ate 2 large pizzas on my 30th birthday', the quantity is 2, not 30.

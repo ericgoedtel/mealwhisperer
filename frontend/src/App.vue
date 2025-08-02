@@ -9,7 +9,6 @@ const isProcessing = ref(false); // To give user feedback during API call
 const transcript = ref('');
 const aiResponse = ref('');
 const confirmationState = ref(null); // Holds { action, details } for any pending action
-const mealClarificationInput = ref(''); // Input for when meal is missing
 let confirmationTimer = null; // Holds the timeout ID
 let recognition = null; // Will hold the SpeechRecognition instance
 const recognitionSupported = ref(true);
@@ -96,15 +95,13 @@ const cancelLog = () => {
   }, 2000);
 };
 
-const submitMealClarification = async () => {
-  if (!confirmationState.value || !mealClarificationInput.value.trim()) return;
+const submitMealClarification = async (meal) => {
+  if (!confirmationState.value || !meal) return;
 
   isProcessing.value = true;
   const details = confirmationState.value.details;
-  const meal = mealClarificationInput.value.trim();
   
-  // Clear the input and old state
-  mealClarificationInput.value = '';
+  // Clear the old state
   confirmationState.value = null;
 
   try {
@@ -205,8 +202,10 @@ onBeforeUnmount(() => {
         </template>
         <!-- Meal clarification input -->
         <template v-else-if="confirmationState.action === 'meal_clarification_required'">
-          <input v-model="mealClarificationInput" @keyup.enter="submitMealClarification" placeholder="e.g., breakfast" class="meal-input"/>
-          <button @click="submitMealClarification">Submit</button>
+          <button @click="submitMealClarification('breakfast')">Breakfast</button>
+          <button @click="submitMealClarification('lunch')">Lunch</button>
+          <button @click="submitMealClarification('dinner')">Dinner</button>
+          <button @click="submitMealClarification('snack')">Snack</button>
           <button @click="cancelLog" class="cancel-button">Cancel</button>
         </template>
         <!-- Default cancel for auto-confirm readback -->
@@ -270,12 +269,6 @@ onBeforeUnmount(() => {
 .confirmation-buttons button {
   border: none;
   border-radius: 5px;
-}
-.confirmation-buttons .meal-input {
-  padding: 8px;
-  border: 1px solid #ccc;
-  border-radius: 5px;
-  flex-grow: 1;
 }
 
 .confirmation-buttons button:first-of-type:not(:last-of-type) {
