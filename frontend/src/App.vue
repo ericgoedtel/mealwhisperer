@@ -1,5 +1,5 @@
 <script setup>
-import { ref, onMounted, onBeforeUnmount, computed } from 'vue';
+import { ref, onMounted, onBeforeUnmount, computed, nextTick } from 'vue';
 import axios from 'axios';
 
 // --- State ---
@@ -9,6 +9,8 @@ const transcript = ref('');
 const aiResponse = ref('');
 const confirmationState = ref(null); // Holds { action, details } for any pending action
 const dailyLog = ref(null);
+const editingEntryId = ref(null); // ID of the entry being edited
+const editingQuantity = ref(null); // The value in the edit input
 const viewedDate = ref(new Date()); // The date currently being viewed by the user
 let confirmationTimer = null; // Holds the timeout ID
 let recognition = null; // Will hold the SpeechRecognition instance
@@ -151,6 +153,26 @@ const changeDate = (days) => {
   fetchDailyLog(); // Fetch data for the new date
 };
 
+const editQuantity = (entry) => {
+  editingEntryId.value = entry.id;
+  editingQuantity.value = entry.quantity;
+  // nextTick ensures the DOM is updated before we try to find and focus the input
+  nextTick(() => {
+    const inputEl = document.getElementById(`qty-input-${entry.id}`);
+    if (inputEl) {
+      inputEl.focus();
+      inputEl.select();
+    }
+  });
+};
+
+const cancelEdit = () => {
+  // For now, this simply reverts the UI back to the display state.
+  // In the next step, this will become the save function.
+  editingEntryId.value = null;
+  editingQuantity.value = null;
+};
+
 const fetchDailyLog = async () => {
   try {
     console.log("Attempting to fetch daily log...");
@@ -261,7 +283,7 @@ onBeforeUnmount(() => {
         <template v-else>
           <button @click="cancelLog" class="cancel-button">Cancel</button>
         </template>
-      </div>
+    </div>
     </div>
     <div class="daily-log-container" v-if="dailyLog">
       <div class="date-navigation">
@@ -283,7 +305,21 @@ onBeforeUnmount(() => {
               <div class="col-cals">Calories</div>
             </div>
             <div v-for="(entry, index) in mealData.entries" :key="index" class="entry-row">
-              <div class="col-qty">{{ entry.quantity }}</div>
+              <div class="col-qty">
+                <input
+                  v-if="editingEntryId === entry.id"
+                  :id="`qty-input-${entry.id}`"
+                  type="number"
+                  v-model="editingQuantity"
+                  @blur="cancelEdit"
+                  @keyup.enter="cancelEdit"
+                  @keyup.esc="cancelEdit"
+                  class="qty-input"
+                />
+                <span v-else @click="editQuantity(entry)" class="qty-display">
+                  {{ entry.quantity }}
+                </span>
+              </div>
               <div class="col-food">{{ entry.food }}</div>
               <div class="col-cals">{{ entry.total_calories || 0 }}</div>
             </div>
@@ -444,7 +480,27 @@ onBeforeUnmount(() => {
   padding-bottom: 12px;
 }
 
-.col-qty { background-color: #eaf2f8; padding: 5px; border-radius: 4px; text-align: center; }
+.col-qty { text-align: center; }
+.qty-display {
+  display: inline-block;
+  padding: 5px;
+  border-radius: 4px;
+  background-color: #eaf2f8;
+  cursor: pointer;
+  min-width: 30px;
+}
+.qty-input {
+  width: 50px;
+  padding: 4px;
+  text-align: center;
+  border: 1px solid #3498db;
+  border-radius: 4px;
+  background-color: #fdfefe;
+}
+/* Hide the number input spinners for a cleaner look */
+.qty-input::-webkit-outer-spin-button,
+.qty-input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+.qty-input[type=number] { -moz-appearance: textfield; }
 .col-food { background-color: #e8f6f3; padding: 5px; border-radius: 4px; }
 .col-cals { background-color: #fdedec; padding: 5px; border-radius: 4px; text-align: right; }
 .support-error {
