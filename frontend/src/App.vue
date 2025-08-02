@@ -1,6 +1,6 @@
 <script setup>
 import { ref, onMounted, onBeforeUnmount, computed, nextTick } from 'vue';
-import axios from 'axios';
+import apiClient from './apiClient.js';
 
 // --- State ---
 const isRecording = ref(false);
@@ -59,7 +59,7 @@ const sendPromptToBackend = async () => {
 
   isProcessing.value = true;
   try {
-    const response = await axios.post('http://127.0.0.1:5000/api/prompt', {
+    const response = await apiClient.post('/api/prompt', {
       text: transcript.value,
     });
     console.log('Backend response:', response.data);
@@ -95,7 +95,7 @@ const confirmLog = async () => {
 
   isProcessing.value = true;
   try {
-    const response = await axios.post('http://127.0.0.1:5000/api/prompt', {
+    const response = await apiClient.post('/api/prompt', {
       action: 'confirm_log',
       details: confirmationState.value.details,
     });
@@ -135,7 +135,7 @@ const submitMealClarification = async (meal) => {
   confirmationState.value = null;
 
   try {
-    const response = await axios.post('http://127.0.0.1:5000/api/prompt', {
+    const response = await apiClient.post('/api/prompt', {
       action: 'clarify_meal',
       details: details,
       meal: meal
@@ -205,14 +205,14 @@ const saveQuantity = async (entry) => {
 
   try {
     const dateString = getApiDateString(viewedDate.value);
-    const url = `http://127.0.0.1:5000/api/logs/${dateString}/entry/${entry.id}`;
+    const url = `/api/logs/${dateString}/entry/${entry.id}`;
 
     if (newQuantity === 0) {
       // Perform a DELETE request
-      await axios.delete(url);
+      await apiClient.delete(url);
     } else {
       // Perform a PATCH request to update
-      await axios.patch(url, {
+      await apiClient.patch(url, {
         quantity: newQuantity,
       });
     }
@@ -249,7 +249,7 @@ const saveFoodCalories = async () => {
   }
 
   try {
-    await axios.patch(`http://127.0.0.1:5000/api/foods/${editingFood.value.id}`, {
+    await apiClient.patch(`/api/foods/${editingFood.value.id}`, {
       calories: newCalories,
     });
     closeFoodEditor();
@@ -267,7 +267,7 @@ const fetchDailyLog = async () => {
     // Correctly get the local date, not the UTC date from toISOString().
     // This prevents timezone-related off-by-one-day errors.
     const dateString = getApiDateString(viewedDate.value);
-    const response = await axios.get(`http://127.0.0.1:5000/api/logs/${dateString}`);
+    const response = await apiClient.get(`/api/logs/${dateString}`);
     console.log("Successfully fetched data from backend:", response.data);
     dailyLog.value = response.data; // Always set the data
 
