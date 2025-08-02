@@ -1,0 +1,40 @@
+name: Build and Push Docker Images
+
+# This workflow runs on every push to the 'main' branch.
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    # Grant the GITHUB_TOKEN permissions to write to the container registry.
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # 4.2.2
+
+      - name: Log in to the GitHub Container Registry
+        uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # 3.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push backend API image
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # 6.18.0
+        with:
+          context: ./backend
+          push: true
+          tags: ghcr.io/${{ github.repository }}/mealwhisperer-api:latest
+
+      - name: Build and push frontend image
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # 6.18.0
+        with:
+          context: ./frontend
+          push: true
+          tags: ghcr.io/${{ github.repository }}/mealwhisperer-frontend:latest
