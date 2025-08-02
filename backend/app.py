@@ -1,6 +1,5 @@
 import os
 from flask import Flask, jsonify, request
-import re
 from flask_cors import CORS
 import json
 from dotenv import load_dotenv
@@ -34,12 +33,14 @@ def handle_prompt():
 
     system_instruction = """
     You are a meal logging assistant. Your primary function is to identify when a user wants to log a meal.
-    If the user's request is to log a food item for a specific meal (e.g., "log eggs for breakfast", "add a sandwich to my lunch"), respond ONLY with a JSON object in the following format:
-    {"action": "log_meal", "details": {"food": "...", "meal": "..."}}
+    If the user's request is to log a food item for a specific meal (e.g., "log eggs for breakfast", "I ate 2 sandwiches for lunch"), respond ONLY with a JSON object in the following format:
+    {"action": "log_meal", "details": {"food": "...", "meal": "...", "quantity": ...}}
+
+    The "quantity" field should be a number. If no quantity is mentioned, you can omit the field as the system will default to 1.
 
     Do not add any other text, explanation, or markdown formatting around the JSON.
 
-    If the user's request is anything else (e.g., a question, a greeting, a general command), respond naturally as a helpful assistant.
+    If the user's request is anything else (e.g., a question, a greeting, a general command), respond conversationally as a helpful assistant.
     """
     try:
         model = genai.GenerativeModel(
@@ -55,19 +56,29 @@ def handle_prompt():
                 details = response_data.get('details', {})
                 food = details.get('food', 'unknown')
                 meal = details.get('meal', 'unknown')
-                print(f"Gemini identified command: Logging '{food}' for '{meal}'.")
-                response_text = f"Okay, I've logged '{food}' for {meal}."
+                quantity = details.get('quantity')
+                if quantity is None:
+                    quantity = 1
+                
+                # Ensure the details object reflects the final quantity
+                details['quantity'] = quantity
+
+                # Build the log message and user-facing response text dynamically
+                log_message = f"Gemini identified command: Logging {quantity} '{food}' for '{meal}'."
+                response_text = f"Okay, I've logged {quantity} {food} for {meal}."
+                
+                print(log_message)
+
                 return jsonify({
                     'status': 'success',
                     'action': 'log_meal',
-                    'details': {'food': food, 'meal': meal},
+                    'details': details,
                     'response_text': response_text
                 })
         except (json.JSONDecodeError, AttributeError):
             # If it's not our specific JSON, treat it as a standard text response
             print(f"Gemini response: '{response.text}'")
             return jsonify({'status': 'success', 'action': 'ai_response', 'response_text': response.text})
-
     except Exception as e:
         print(f"Error calling Gemini API: {e}")
         return jsonify({'status': 'error', 'message': 'An error occurred while processing your request.'}), 500
