@@ -8,7 +8,7 @@ const isRecording = ref(false);
 const isProcessing = ref(false); // To give user feedback during API call
 const transcript = ref('');
 const aiResponse = ref('');
-const confirmationDetails = ref(null); // Holds details for confirmation
+const confirmationState = ref(null); // Holds { action, details } for confirmation
 let confirmationTimer = null; // Holds the timeout ID
 let recognition = null; // Will hold the SpeechRecognition instance
 const recognitionSupported = ref(true);
@@ -22,7 +22,7 @@ const toggleRecording = () => {
   } else {
     transcript.value = ''; // Clear previous transcript before starting
     aiResponse.value = ''; // Clear previous AI response
-    confirmationDetails.value = null; // Clear previous confirmation state
+    confirmationState.value = null; // Clear previous confirmation state
     if (confirmationTimer) clearTimeout(confirmationTimer); // Clear any pending timer
     recognition.start();
   }
@@ -38,20 +38,24 @@ const sendPromptToBackend = async () => {
     });
     console.log('Backend response:', response.data);
 
+    const { action, details, response_text } = response.data;
+    aiResponse.value = response_text;
+
     // Handle the response from the backend
-    if (response.data.action === 'readback_required') {
-      confirmationDetails.value = response.data.details;
-      // Start a 5-second timer to auto-confirm the log.
-      confirmationTimer = setTimeout(() => {
-        if (confirmationDetails.value) { // Ensure it wasn't cancelled
-          confirmLog();
-        }
-      }, 5000);
+    if (action === 'readback_required' || action === 'explicit_confirmation_required') {
+      confirmationState.value = { action, details };
+      if (action === 'readback_required') {
+        // Start a 5-second timer to auto-confirm the log.
+        confirmationTimer = setTimeout(() => {
+          if (confirmationState.value) { // Ensure it wasn't cancelled
+            confirmLog();
+          }
+        }, 5000);
+      }
     } else {
-      confirmationDetails.value = null; // Clear any old confirmation
+      confirmationState.value = null; // Clear any old confirmation
     }
 
-    aiResponse.value = response.data.response_text;
   } catch (error) {
     console.error('Error getting AI response:', error);
     aiResponse.value = 'Sorry, an error occurred. Please try again.';
@@ -61,13 +65,13 @@ const sendPromptToBackend = async () => {
 };
 
 const confirmLog = async () => {
-  if (!confirmationDetails.value) return;
+  if (!confirmationState.value) return;
 
   isProcessing.value = true;
   try {
     const response = await axios.post('http://127.0.0.1:5000/api/prompt', {
       action: 'confirm_log',
-      details: confirmationDetails.value,
+      details: confirmationState.value.details,
     });
     console.log('Confirmation response:', response.data);
     aiResponse.value = response.data.response_text;
@@ -76,14 +80,14 @@ const confirmLog = async () => {
     aiResponse.value = 'Sorry, could not confirm the log.';
   } finally {
     // Clear confirmation state after action is complete
-    confirmationDetails.value = null;
+    confirmationState.value = null;
     isProcessing.value = false;
   }
 };
 
 const cancelLog = () => {
   if (confirmationTimer) clearTimeout(confirmationTimer);
-  confirmationDetails.value = null;
+  confirmationState.value = null;
   aiResponse.value = "Okay, cancelled.";
   // Briefly show the cancellation message before clearing it.
   setTimeout(() => {
@@ -156,8 +160,9 @@ onBeforeUnmount(() => {
     <div class="ai-response-container" v-if="aiResponse">
       <h2>AI Response:</h2>
       <p>{{ aiResponse }}</p>
-      <div v-if="confirmationDetails" class="confirmation-buttons">
-        <button @click="cancelLog" class="cancel-button">Cancel</button>
+      <div v-if="confirmationState" class="confirmation-buttons">
+        <button v-if="confirmationState.action === 'explicit_confirmation_required'" @click="confirmLog" :disabled="isProcessing">Yes, Log It</button>
+        <button @click="cancelLog" class="cancel-button">Cancel / No</button>
       </div>
     </div>
   </div>
@@ -215,6 +220,10 @@ onBeforeUnmount(() => {
 .confirmation-buttons button {
   border: none;
   border-radius: 5px;
+}
+.confirmation-buttons button:first-of-type:not(:last-of-type) {
+  background-color: #2ecc71;
+  color: white;
 }
 .confirmation-buttons .cancel-button {
   background-color: #e74c3c;

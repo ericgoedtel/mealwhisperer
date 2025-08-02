@@ -51,7 +51,10 @@ def handle_initial_prompt(data):
     If the user's request is to log a food item for a specific meal (e.g., "log eggs for breakfast", "I ate 2 sandwiches for lunch"), respond ONLY with a JSON object in the following format:
     {"action": "log_meal", "details": {"food": "...", "meal": "...", "quantity": ...}}
 
-    The "quantity" field should be a number. If no quantity is mentioned, you can omit the field as the system will default to 1.
+    The "quantity" is the number describing how many of the food item were eaten. It is usually found right before the food name.
+    If multiple numbers are present, use context to determine the correct quantity. For example, in 'I ate 2 large pizzas on my 30th birthday', the quantity is 2, not 30.
+    If the quantity is ambiguous or seems like a transcription error (e.g., '5 817 eggs'), choose the most plausible number that modifies the food item.
+    If no quantity is mentioned, you can omit the field as the system will default to 1.
 
     Do not add any other text, explanation, or markdown formatting around the JSON.
 
@@ -77,15 +80,25 @@ def handle_initial_prompt(data):
                 
                 details['quantity'] = quantity
 
-                # --- ALWAYS ASK FOR CONFIRMATION VIA READBACK ---
-                # Instead of logging, send a readback to the frontend.
-                print(f"Readback required for: {details}")
-                return jsonify({
-                    'status': 'success',
-                    'action': 'readback_required',
-                    'details': details,
-                    'response_text': f"Got it: {quantity} {food} for {meal}. I'll log this in a moment unless you cancel."
-                })
+                # --- SANITY CHECK & READBACK ---
+                if quantity > 6:
+                    # For high quantities, the readback is a direct question and requires explicit confirmation.
+                    print(f"High quantity ({quantity}) detected. Requiring explicit confirmation.")
+                    return jsonify({
+                        'status': 'success',
+                        'action': 'explicit_confirmation_required',
+                        'details': details,
+                        'response_text': f"Did you really have {quantity} {food}? Please confirm to log."
+                    })
+                else:
+                    # For normal quantities, do the standard readback with auto-confirmation.
+                    print(f"Readback required for: {details}")
+                    return jsonify({
+                        'status': 'success',
+                        'action': 'readback_required',
+                        'details': details,
+                        'response_text': f"Got it: {quantity} {food} for {meal}. I'll log this in a moment unless you cancel."
+                    })
 
         except (json.JSONDecodeError, AttributeError):
             # If it's not our specific JSON, treat it as a standard text response
