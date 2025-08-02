@@ -10,6 +10,8 @@ const aiResponse = ref('');
 const confirmationState = ref(null); // Holds { action, details } for any pending action
 const dailyLog = ref(null);
 const editingEntryId = ref(null); // ID of the entry being edited
+const isFoodModalVisible = ref(false);
+const editingFood = ref(null); // Holds {id, name, calories} for the food being edited
 const editingQuantity = ref(null); // The value in the edit input
 const viewedDate = ref(new Date()); // The date currently being viewed by the user
 let confirmationTimer = null; // Holds the timeout ID
@@ -202,6 +204,42 @@ const saveQuantity = async (entry) => {
   }
 };
 
+const openFoodEditor = (entry) => {
+  editingFood.value = {
+    id: entry.food_id,
+    name: entry.food,
+    calories: entry.per_item_calories,
+  };
+  isFoodModalVisible.value = true;
+};
+
+const closeFoodEditor = () => {
+  isFoodModalVisible.value = false;
+  editingFood.value = null;
+};
+
+const saveFoodCalories = async () => {
+  if (!editingFood.value) return;
+
+  const newCalories = Number(editingFood.value.calories);
+  if (isNaN(newCalories) || newCalories < 0 || newCalories > 5000) {
+    alert("Please enter a valid calorie amount (0-5000).");
+    return;
+  }
+
+  try {
+    await axios.patch(`http://127.0.0.1:5000/api/foods/${editingFood.value.id}`, {
+      calories: newCalories,
+    });
+    closeFoodEditor();
+    // Refresh the daily log to show the updated calorie calculations
+    await fetchDailyLog();
+  } catch (error) {
+    console.error("Error updating food calories:", error);
+    alert("Failed to update calories. Please try again.");
+  }
+};
+
 const fetchDailyLog = async () => {
   try {
     console.log("Attempting to fetch daily log...");
@@ -273,6 +311,24 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
+  <!-- Food Editor Modal -->
+  <div v-if="isFoodModalVisible" class="modal-overlay" @click.self="closeFoodEditor">
+    <div class="modal-content">
+      <h3>Edit Food</h3>
+      <div v-if="editingFood">
+        <p class="food-name-display">{{ editingFood.name }}</p>
+        <div class="modal-form-group">
+          <label for="food-calories">Calories per serving:</label>
+          <input id="food-calories" type="number" v-model="editingFood.calories" />
+        </div>
+        <div class="modal-actions">
+          <button @click="saveFoodCalories" class="save-button">Save</button>
+          <button @click="closeFoodEditor" class="cancel-button">Cancel</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <div id="app">
     <div class="transcription-controls">
       <button @click="toggleRecording" :disabled="!recognitionSupported || isProcessing">
@@ -344,7 +400,9 @@ onBeforeUnmount(() => {
                   {{ entry.quantity }}
                 </span>
               </div>
-              <div class="col-food">{{ entry.food }}</div>
+              <div class="col-food">
+                <span @click="openFoodEditor(entry)" class="food-name-clickable">{{ entry.food }}</span>
+              </div>
               <div class="col-cals">{{ entry.total_calories || 0 }}</div>
             </div>
           </div>
@@ -526,6 +584,10 @@ onBeforeUnmount(() => {
 .qty-input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
 .qty-input[type=number] { -moz-appearance: textfield; }
 .col-food { background-color: #e8f6f3; padding: 5px; border-radius: 4px; }
+.food-name-clickable {
+  cursor: pointer;
+  text-decoration: underline dotted;
+}
 .col-cals { background-color: #fdedec; padding: 5px; border-radius: 4px; text-align: right; }
 .support-error {
   color: #c0392b;
@@ -536,5 +598,61 @@ onBeforeUnmount(() => {
   background-color: #f8f9fa;
   border-radius: 8px;
   color: #6c757d;
+}
+
+/* Modal Styles */
+.modal-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background-color: rgba(0, 0, 0, 0.6);
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  z-index: 1000;
+}
+
+.modal-content {
+  background: white;
+  padding: 20px 30px;
+  border-radius: 8px;
+  width: 90%;
+  max-width: 400px;
+  box-shadow: 0 5px 15px rgba(0,0,0,0.3);
+}
+
+.modal-content h3 {
+  margin-top: 0;
+}
+
+.food-name-display {
+  font-size: 1.2em;
+  font-weight: bold;
+  text-transform: capitalize;
+  margin-bottom: 20px;
+}
+
+.modal-form-group {
+  margin-bottom: 20px;
+}
+
+.modal-form-group label {
+  display: block;
+  margin-bottom: 5px;
+}
+
+.modal-form-group input {
+  width: 100%;
+  padding: 8px;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
 }
 </style>

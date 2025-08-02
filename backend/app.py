@@ -238,6 +238,7 @@ def get_logs_for_date(meal_date):
                 f.id as food_id,
                 ml.meal,
                 ml.quantity,
+                ml.total_calories,
                 f.name as food,
                 f.calories as per_item_calories
             FROM meal_logs ml
@@ -256,12 +257,12 @@ def get_logs_for_date(meal_date):
 
         for row in rows:
             meal_type = row['meal']
-            # Calculate total calories for this entry based on the canonical value
-            entry_total_calories = (row['per_item_calories'] or 0) * row['quantity']
+            # Use the historically stored total_calories for accuracy
+            historical_total_calories = row['total_calories'] or 0
 
-            meals_data[meal_type]['entries'].append({**dict(row), 'total_calories': entry_total_calories})
-            meals_data[meal_type]['total_meal_calories'] += entry_total_calories
-            total_daily_calories += entry_total_calories
+            meals_data[meal_type]['entries'].append(dict(row))
+            meals_data[meal_type]['total_meal_calories'] += historical_total_calories
+            total_daily_calories += historical_total_calories
 
         return jsonify({
             'total_daily_calories': total_daily_calories,
