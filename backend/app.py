@@ -22,14 +22,29 @@ except KeyError:
     print("CRITICAL: GOOGLE_API_KEY environment variable not set. The service will not work.")
 
 
-@app.route('/api/prompt', methods=['POST'])
-def handle_prompt():
+def handle_confirmed_log(data):
+    """Handles a request that has been confirmed by the user (or by timeout)."""
+    details = data.get('details', {})
+    food = details.get('food', 'unknown')
+    meal = details.get('meal', 'unknown')
+    quantity = details.get('quantity', 1)
+
+    # This is where you would persist the data to a database.
+    print(f"CONFIRMED: Logging {quantity} '{food}' for '{meal}'.")
+
+    return jsonify({
+        'status': 'success',
+        'action': 'log_finalized',
+        'response_text': f"Done. I've logged {quantity} {food} for {meal}."
+    })
+
+def handle_initial_prompt(data):
+    """Handles the initial text prompt from the user by calling the AI."""
     data = request.get_json()
     if not data or 'text' not in data:
         return jsonify({'error': 'No text provided'}), 400
 
     prompt_text = data['text'].strip()
-    print(f"Received prompt: '{prompt_text}'")
 
     system_instruction = """
     You are a meal logging assistant. Your primary function is to identify when a user wants to log a meal.
@@ -60,21 +75,18 @@ def handle_prompt():
                 if quantity is None:
                     quantity = 1
                 
-                # Ensure the details object reflects the final quantity
                 details['quantity'] = quantity
 
-                # Build the log message and user-facing response text dynamically
-                log_message = f"Gemini identified command: Logging {quantity} '{food}' for '{meal}'."
-                response_text = f"Okay, I've logged {quantity} {food} for {meal}."
-                
-                print(log_message)
-
+                # --- ALWAYS ASK FOR CONFIRMATION VIA READBACK ---
+                # Instead of logging, send a readback to the frontend.
+                print(f"Readback required for: {details}")
                 return jsonify({
                     'status': 'success',
-                    'action': 'log_meal',
+                    'action': 'readback_required',
                     'details': details,
-                    'response_text': response_text
+                    'response_text': f"Got it: {quantity} {food} for {meal}. I'll log this in a moment unless you cancel."
                 })
+
         except (json.JSONDecodeError, AttributeError):
             # If it's not our specific JSON, treat it as a standard text response
             print(f"Gemini response: '{response.text}'")
@@ -82,6 +94,24 @@ def handle_prompt():
     except Exception as e:
         print(f"Error calling Gemini API: {e}")
         return jsonify({'status': 'error', 'message': 'An error occurred while processing your request.'}), 500
+
+@app.route('/api/prompt', methods=['POST'])
+def handle_prompt():
+    """Main route to handle all prompt-related requests."""
+    data = request.get_json()
+    if not data:
+        return jsonify({'error': 'No data provided'}), 400
+
+    prompt_text = data.get('text')
+    if prompt_text is not None:
+        print(f"Received initial prompt: '{prompt_text.strip()}'")
+        return handle_initial_prompt(data)
+
+    if data.get('action') == 'confirm_log' and 'details' in data:
+        print("Received confirmation to log.")
+        return handle_confirmed_log(data)
+
+    return jsonify({'error': 'Invalid request payload'}), 400
 
 if __name__ == '__main__':
     app.run(debug=True)

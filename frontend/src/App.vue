@@ -8,6 +8,8 @@ const isRecording = ref(false);
 const isProcessing = ref(false); // To give user feedback during API call
 const transcript = ref('');
 const aiResponse = ref('');
+const confirmationDetails = ref(null); // Holds details for confirmation
+let confirmationTimer = null; // Holds the timeout ID
 let recognition = null; // Will hold the SpeechRecognition instance
 const recognitionSupported = ref(true);
 
@@ -20,6 +22,8 @@ const toggleRecording = () => {
   } else {
     transcript.value = ''; // Clear previous transcript before starting
     aiResponse.value = ''; // Clear previous AI response
+    confirmationDetails.value = null; // Clear previous confirmation state
+    if (confirmationTimer) clearTimeout(confirmationTimer); // Clear any pending timer
     recognition.start();
   }
 };
@@ -32,13 +36,59 @@ const sendPromptToBackend = async () => {
     const response = await axios.post('http://127.0.0.1:5000/api/prompt', {
       text: transcript.value,
     });
-    console.log('AI response:', response.data);
+    console.log('Backend response:', response.data);
+
+    // Handle the response from the backend
+    if (response.data.action === 'readback_required') {
+      confirmationDetails.value = response.data.details;
+      // Start a 5-second timer to auto-confirm the log.
+      confirmationTimer = setTimeout(() => {
+        if (confirmationDetails.value) { // Ensure it wasn't cancelled
+          confirmLog();
+        }
+      }, 5000);
+    } else {
+      confirmationDetails.value = null; // Clear any old confirmation
+    }
+
     aiResponse.value = response.data.response_text;
   } catch (error) {
     console.error('Error getting AI response:', error);
+    aiResponse.value = 'Sorry, an error occurred. Please try again.';
   } finally {
     isProcessing.value = false;
   }
+};
+
+const confirmLog = async () => {
+  if (!confirmationDetails.value) return;
+
+  isProcessing.value = true;
+  try {
+    const response = await axios.post('http://127.0.0.1:5000/api/prompt', {
+      action: 'confirm_log',
+      details: confirmationDetails.value,
+    });
+    console.log('Confirmation response:', response.data);
+    aiResponse.value = response.data.response_text;
+  } catch (error) {
+    console.error('Error confirming log:', error);
+    aiResponse.value = 'Sorry, could not confirm the log.';
+  } finally {
+    // Clear confirmation state after action is complete
+    confirmationDetails.value = null;
+    isProcessing.value = false;
+  }
+};
+
+const cancelLog = () => {
+  if (confirmationTimer) clearTimeout(confirmationTimer);
+  confirmationDetails.value = null;
+  aiResponse.value = "Okay, cancelled.";
+  // Briefly show the cancellation message before clearing it.
+  setTimeout(() => {
+      if (aiResponse.value === "Okay, cancelled.") aiResponse.value = '';
+  }, 2000);
 };
 
 onMounted(() => {
@@ -82,6 +132,7 @@ onMounted(() => {
 // Clean up the recognition service when the component is unmounted
 onBeforeUnmount(() => {
   if (recognition) {
+    if (confirmationTimer) clearTimeout(confirmationTimer);
     recognition.abort();
   }
 });
@@ -105,6 +156,9 @@ onBeforeUnmount(() => {
     <div class="ai-response-container" v-if="aiResponse">
       <h2>AI Response:</h2>
       <p>{{ aiResponse }}</p>
+      <div v-if="confirmationDetails" class="confirmation-buttons">
+        <button @click="cancelLog" class="cancel-button">Cancel</button>
+      </div>
     </div>
   </div>
 </template>
@@ -151,6 +205,20 @@ onBeforeUnmount(() => {
   max-width: 600px;
   margin-left: auto;
   margin-right: auto;
+}
+.confirmation-buttons {
+  margin-top: 15px;
+  display: flex;
+  gap: 10px;
+  justify-content: flex-end;
+}
+.confirmation-buttons button {
+  border: none;
+  border-radius: 5px;
+}
+.confirmation-buttons .cancel-button {
+  background-color: #e74c3c;
+  color: white;
 }
 .support-error {
   color: #c0392b;
