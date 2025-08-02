@@ -28,6 +28,17 @@ const formattedViewedDate = computed(() => {
   });
 });
 
+const sortedMeals = computed(() => {
+  if (!dailyLog.value || !dailyLog.value.meals) {
+    return [];
+  }
+  const mealOrder = ['breakfast', 'lunch', 'dinner', 'snack'];
+  // Convert object to array, sort it by the canonical order, and return it
+  return Object.entries(dailyLog.value.meals)
+    .map(([name, data]) => ({ name, data }))
+    .sort((a, b) => mealOrder.indexOf(a.name) - mealOrder.indexOf(b.name));
+});
+
 // --- Methods ---
 const toggleRecording = () => {
   if (!recognition || isProcessing.value) return;
@@ -373,10 +384,10 @@ onBeforeUnmount(() => {
       </div>
       <h3 class="daily-total">Total: {{ dailyLog.total_daily_calories }} calories</h3>
       <div class="meal-swimlanes" v-if="Object.keys(dailyLog.meals).length > 0">
-        <div v-for="(mealData, mealName) in dailyLog.meals" :key="mealName" class="meal-lane">
+        <div v-for="meal in sortedMeals" :key="meal.name" class="meal-lane">
           <h3 class="meal-header">
-            <span>{{ mealName }}</span>
-            <span class="meal-total">{{ mealData.total_meal_calories }} calories</span>
+            <span>{{ meal.name }}</span>
+            <span class="meal-total">{{ meal.data.total_meal_calories }} calories</span>
           </h3>
           <div class="meal-entries">
             <div class="entry-row header-row">
@@ -384,7 +395,7 @@ onBeforeUnmount(() => {
               <div class="col-food">Food</div>
               <div class="col-cals">Calories</div>
             </div>
-            <div v-for="(entry, index) in mealData.entries" :key="index" class="entry-row">
+            <div v-for="(entry, index) in meal.data.entries" :key="index" class="entry-row">
               <div class="col-qty">
                 <input
                   v-if="editingEntryId === entry.id"
