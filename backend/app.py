@@ -12,7 +12,7 @@ load_dotenv()
 
 DB_FILE = 'meals.db'
 
-LATEST_SCHEMA_VERSION = 3
+LATEST_SCHEMA_VERSION = 4
 
 def _run_migration_v2(cursor):
     """
@@ -75,6 +75,50 @@ def _run_migration_v3(cursor):
         print(f"Error applying migration v3: {e}")
         raise
 
+def _run_migration_v4(cursor):
+    """
+    Migration v4:
+    1. Creates a canonical 'foods' table for items and their calories.
+    2. Rebuilds 'meal_logs' to use a foreign key 'food_id'.
+    """
+    try:
+        # Create the new foods table with a unique constraint on the name
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS foods (
+                id INTEGER PRIMARY KEY,
+                name TEXT NOT NULL UNIQUE,
+                calories INTEGER NOT NULL
+            )
+        ''')
+        print("Migration v4: Created 'foods' table.")
+
+        # Rebuild meal_logs table to reference the new foods table.
+        # This approach is safe for an empty database as per the user's context.
+        cursor.execute("PRAGMA foreign_keys=off")
+        cursor.execute("BEGIN TRANSACTION")
+
+        cursor.execute('''
+            CREATE TABLE meal_logs_v4 (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                log_timestamp INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
+                meal_date DATE NOT NULL,
+                food_id INTEGER NOT NULL,
+                meal TEXT NOT NULL,
+                quantity INTEGER NOT NULL,
+                total_calories INTEGER,
+                FOREIGN KEY (food_id) REFERENCES foods (id)
+            )
+        ''')
+        cursor.execute("DROP TABLE meal_logs")
+        cursor.execute("ALTER TABLE meal_logs_v4 RENAME TO meal_logs")
+        cursor.execute("COMMIT")
+        cursor.execute("PRAGMA foreign_keys=on")
+        print("Migration v4: Rebuilt 'meal_logs' table with 'food_id' foreign key.")
+    except sqlite3.Error as e:
+        print(f"Error applying migration v4: {e}")
+        cursor.execute("ROLLBACK")
+        raise
+
 def init_db():
     """Initializes and migrates the database to the latest version."""
     conn = sqlite3.connect(DB_FILE)
@@ -113,6 +157,12 @@ def init_db():
             _run_migration_v3(cursor)
             cursor.execute(f"PRAGMA user_version = 3")
             print("Schema v3 applied.")
+
+        if current_version < 4:
+            print("Applying schema v4...")
+            _run_migration_v4(cursor)
+            cursor.execute(f"PRAGMA user_version = 4")
+            print("Schema v4 applied.")
 
         if current_version == LATEST_SCHEMA_VERSION:
             print("Database is up to date.")
@@ -180,7 +230,18 @@ def get_logs_for_date(meal_date):
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT id, meal, food, quantity, total_calories FROM meal_logs WHERE meal_date = ? ORDER BY log_timestamp",
+            """
+            SELECT
+                ml.id,
+                ml.meal,
+                ml.quantity,
+                ml.total_calories,
+                f.name as food
+            FROM meal_logs ml
+            JOIN foods f ON ml.food_id = f.id
+            WHERE ml.meal_date = ?
+            ORDER BY ml.log_timestamp
+            """,
             (meal_date,)
         )
         rows = cursor.fetchall()
@@ -280,8 +341,8 @@ def handle_confirmed_log(data):
         conn = sqlite3.connect(DB_FILE)
         cursor = conn.cursor()
         cursor.execute(
-            "INSERT INTO meal_logs (meal_date, food, meal, quantity, total_calories) VALUES (?, ?, ?, ?, ?)",
-            (meal_date, food, meal, quantity, total_calories)
+            "INSERT INTO meal_logs (meal_date, food_id, meal, quantity, total_calories) VALUES (?, ?, ?, ?, ?)",
+            (meal_date, details.get('food_id'), meal, quantity, total_calories)
         )
         conn.commit()
         conn.close()
@@ -325,6 +386,36 @@ def handle_initial_prompt(data):
             if response_data.get('action') == 'log_meal':
                 details = response_data.get('details', {})
                 food = details.get('food', 'unknown')
+
+                # --- Canonical Food Logic ---
+                conn = sqlite3.connect(DB_FILE)
+                cursor = conn.cursor()
+                cursor.execute("SELECT id, calories FROM foods WHERE name = ?", (food,))
+                food_row = cursor.fetchone()
+
+                if food_row:
+                    # Food exists, use its canonical data
+                    food_id = food_row[0]
+                    canonical_calories = food_row[1]
+                    print(f"Found existing food '{food}' (ID: {food_id}) with {canonical_calories} calories.")
+                else:
+                    # Food does not exist, insert it using the LLM's estimate
+                    llm_calories = details.get('calories')
+                    try:
+                        calories_to_insert = int(llm_calories) if llm_calories is not None else 0
+                    except (ValueError, TypeError):
+                        calories_to_insert = 0 # Default to 0 if LLM gives non-numeric calorie value
+
+                    cursor.execute("INSERT INTO foods (name, calories) VALUES (?, ?)", (food, calories_to_insert))
+                    food_id = cursor.lastrowid
+                    canonical_calories = calories_to_insert
+                    print(f"Created new food '{food}' (ID: {food_id}) with {canonical_calories} calories.")
+                conn.commit()
+                conn.close()
+
+                details['food_id'] = food_id
+                details['calories'] = canonical_calories # Overwrite LLM calories with our canonical value
+
                 meal = details.get('meal') # Use default None to correctly trigger the check below
                 date_keyword = details.get('date_keyword')
                 quantity = details.get('quantity')
@@ -444,8 +535,8 @@ def update_log_entry(meal_date, log_id):
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
 
-        # First, fetch the existing entry to get calorie info and validate the date
-        cursor.execute("SELECT quantity, total_calories, meal_date FROM meal_logs WHERE id = ?", (log_id,))
+        # First, fetch the existing entry to validate it
+        cursor.execute("SELECT food_id, meal_date FROM meal_logs WHERE id = ?", (log_id,))
         entry = cursor.fetchone()
 
         if not entry:
@@ -453,8 +544,14 @@ def update_log_entry(meal_date, log_id):
         if entry['meal_date'] != meal_date:
             return jsonify({'error': 'Log entry does not belong to the specified date.'}), 400
 
-        # Calculate new total calories if possible
-        new_total_calories = round((entry['total_calories'] / entry['quantity']) * new_quantity) if entry['total_calories'] and entry['quantity'] > 0 else None
+        # Fetch the canonical calories for the food item to ensure accurate recalculation
+        cursor.execute("SELECT calories FROM foods WHERE id = ?", (entry['food_id'],))
+        food_row = cursor.fetchone()
+        if not food_row:
+            return jsonify({'error': 'Associated food item not found, cannot update calories.'}), 500
+        
+        per_item_calories = food_row[0]
+        new_total_calories = round(per_item_calories * new_quantity)
         
         cursor.execute("UPDATE meal_logs SET quantity = ?, total_calories = ? WHERE id = ?", (new_quantity, new_total_calories, log_id))
         conn.commit()
