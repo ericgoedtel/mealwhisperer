@@ -7,6 +7,7 @@ and persists meal data in a local SQLite database.
 """
 
 import json
+import logging
 import os
 import sqlite3
 from collections import defaultdict
@@ -15,6 +16,17 @@ import google.generativeai as genai
 from dotenv import load_dotenv
 from flask import Flask, jsonify, request
 from flask_cors import CORS
+
+LOG_LEVEL_STR = os.getenv('LOG_LEVEL', 'INFO').upper()
+LOG_LEVEL = getattr(logging, LOG_LEVEL_STR, logging.INFO)
+
+logging.basicConfig(
+    level=LOG_LEVEL,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[logging.StreamHandler()]
+)
+logger = logging.getLogger(__name__)
+logger.info("Logging level set to %s", LOG_LEVEL_STR)
 
 load_dotenv()
 
@@ -36,16 +48,16 @@ def _run_migration_v2(cursor):
 
         if 'timestamp' in columns and 'log_timestamp' not in columns:
             cursor.execute("ALTER TABLE meal_logs RENAME COLUMN timestamp TO log_timestamp")
-            print("Migration v2: Renamed 'timestamp' to 'log_timestamp'.")
+            logger.info("Migration v2: Renamed 'timestamp' to 'log_timestamp'.")
 
         if 'meal_date' not in columns:
             cursor.execute("ALTER TABLE meal_logs ADD COLUMN meal_date DATE")
-            print("Migration v2: Added 'meal_date' column.")
+            logger.info("Migration v2: Added 'meal_date' column.")
             cursor.execute("UPDATE meal_logs SET meal_date = date(log_timestamp) WHERE meal_date IS NULL")
-            print("Migration v2: Backfilled 'meal_date' for existing rows.")
+            logger.info("Migration v2: Backfilled 'meal_date' for existing rows.")
 
     except sqlite3.Error as e:
-        print(f"Error applying migration v2: {e}")
+        logger.error("Error applying migration v2", exc_info=e)
         raise # Re-raise to ensure the transaction is rolled back
 
 def _run_migration_v3(cursor):
@@ -66,7 +78,7 @@ def _run_migration_v3(cursor):
                 total_calories INTEGER
             )
         ''')
-        print("Migration v3: Created new temporary table.")
+        logger.info("Migration v3: Created new temporary table.")
 
         # Copy data, converting the timestamp
         cursor.execute('''
@@ -74,15 +86,15 @@ def _run_migration_v3(cursor):
             SELECT id, strftime('%s', log_timestamp), meal_date, food, meal, quantity, total_calories
             FROM meal_logs
         ''')
-        print("Migration v3: Migrated data to new table.")
+        logger.info("Migration v3: Migrated data to new table.")
 
         cursor.execute("DROP TABLE meal_logs")
-        print("Migration v3: Dropped old table.")
+        logger.info("Migration v3: Dropped old table.")
 
         cursor.execute("ALTER TABLE meal_logs_new RENAME TO meal_logs")
-        print("Migration v3: Renamed new table.")
+        logger.info("Migration v3: Renamed new table.")
     except sqlite3.Error as e:
-        print(f"Error applying migration v3: {e}")
+        logger.error("Error applying migration v3", exc_info=e)
         raise
 
 def _run_migration_v4(cursor):
@@ -100,7 +112,7 @@ def _run_migration_v4(cursor):
                 calories INTEGER NOT NULL
             )
         ''')
-        print("Migration v4: Created 'foods' table.")
+        logger.info("Migration v4: Created 'foods' table.")
 
         # Rebuild meal_logs table to reference the new foods table.
         # This approach is safe for an empty database as per the user's context.
@@ -123,9 +135,9 @@ def _run_migration_v4(cursor):
         cursor.execute("ALTER TABLE meal_logs_v4 RENAME TO meal_logs")
         cursor.execute("COMMIT")
         cursor.execute("PRAGMA foreign_keys=on")
-        print("Migration v4: Rebuilt 'meal_logs' table with 'food_id' foreign key.")
+        logger.info("Migration v4: Rebuilt 'meal_logs' table with 'food_id' foreign key.")
     except sqlite3.Error as e:
-        print(f"Error applying migration v4: {e}")
+        logger.error("Error applying migration v4", exc_info=e)
         cursor.execute("ROLLBACK")
         raise
 
@@ -138,10 +150,10 @@ def init_db():
         # Get current schema version using SQLite's built-in pragma
         cursor.execute("PRAGMA user_version")
         current_version = cursor.fetchone()[0]
-        print(f"Database version: {current_version}")
+        logger.info("Database version: %s", current_version)
 
         if current_version < 1:
-            print("Applying schema v1 (initial setup)...")
+            logger.info("Applying schema v1 (initial setup)...")
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS meal_logs (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -154,32 +166,32 @@ def init_db():
             ''')
             cursor.execute("PRAGMA user_version = 1")
             current_version = 1
-            print("Schema v1 applied.")
+            logger.info("Schema v1 applied.")
 
         if current_version < 2:
-            print("Applying schema v2...")
+            logger.info("Applying schema v2...")
             _run_migration_v2(cursor)
             cursor.execute("PRAGMA user_version = 2")
-            print("Schema v2 applied.")
+            logger.info("Schema v2 applied.")
 
         if current_version < 3:
-            print("Applying schema v3...")
+            logger.info("Applying schema v3...")
             _run_migration_v3(cursor)
             cursor.execute("PRAGMA user_version = 3")
-            print("Schema v3 applied.")
+            logger.info("Schema v3 applied.")
 
         if current_version < 4:
-            print("Applying schema v4...")
+            logger.info("Applying schema v4...")
             _run_migration_v4(cursor)
             cursor.execute("PRAGMA user_version = 4")
-            print("Schema v4 applied.")
+            logger.info("Schema v4 applied.")
 
         if current_version == LATEST_SCHEMA_VERSION:
-            print("Database is up to date.")
+            logger.info("Database is up to date.")
 
         conn.commit()
     except sqlite3.Error as e:
-        print(f"DATABASE MIGRATION ERROR: {e}")
+        logger.critical("DATABASE MIGRATION ERROR", exc_info=e)
         conn.rollback()
     finally:
         conn.close()
@@ -196,7 +208,7 @@ try:
     api_key = os.environ["GOOGLE_API_KEY"]
     genai.configure(api_key=api_key)
 except KeyError:
-    print("CRITICAL: GOOGLE_API_KEY environment variable not set. The service will not work.")
+    logger.critical("GOOGLE_API_KEY environment variable not set. The service will not work.")
 
 SYSTEM_INSTRUCTION = """
 You are a meal logging assistant. Your primary function is to identify when a user wants to log a meal.
@@ -278,7 +290,7 @@ def get_logs_for_date(meal_date):
         })
 
     except sqlite3.Error as e:
-        print(f"DATABASE ERROR on SELECT: {e}")
+        logger.error("DATABASE ERROR on SELECT", exc_info=e)
         return jsonify({'error': 'Could not retrieve meal logs.'}), 500
 
 def perform_readback_or_confirmation(details):
@@ -316,18 +328,15 @@ def perform_readback_or_confirmation(details):
         except (ValueError, TypeError):
             date_text = "" # If date is malformed, just ignore it
 
-    # --- SANITY CHECK & READBACK ---
     if quantity > 6:
-        # For high quantities, the readback is a direct question and requires explicit confirmation.
-        print(f"High quantity ({quantity}) detected. Requiring explicit confirmation.")
+        logger.info("High quantity (%s) detected. Requiring explicit confirmation.", quantity)
         return jsonify({
             'status': 'success',
             'action': 'explicit_confirmation_required',
             'details': details,
             'response_text': f"Did you really have {quantity} {food}{date_text}{calorie_text}? Please confirm to log."
         })
-    # For normal quantities, do the standard readback with auto-confirmation.
-    print(f"Readback required for: {details}")
+    logger.debug("Readback required for: %s", details)
     return jsonify({
         'status': 'success',
         'action': 'readback_required',
@@ -359,10 +368,10 @@ def handle_confirmed_log(data):
         conn.commit()
         conn.close()
     except sqlite3.Error as e:
-        print(f"DATABASE ERROR on INSERT: {e}")
+        logger.error("DATABASE ERROR on INSERT", exc_info=e)
         # We can still return a success response to the user even if DB write fails
 
-    print(f"CONFIRMED: Logging {quantity} '{food}' for '{meal}'{calorie_text}.")
+    logger.info("CONFIRMED: Logging %s '%s' for '%s'%s.", quantity, food, meal, calorie_text)
 
     return jsonify({
         'status': 'success',
@@ -383,7 +392,7 @@ def resolve_meal_date(date_keyword: str) -> str:
 
     # Placeholder for a future, more advanced natural language date parser for phrases like "last Tuesday"
     # For now, if we don't recognize the keyword, we default to today.
-    print(f"Unrecognized date_keyword: '{date_keyword}'. Defaulting to today.")
+    logger.warning("Unrecognized date_keyword: '%s'. Defaulting to today.", date_keyword)
     return today.isoformat()
 
 def get_or_create_food(food_name, llm_calories):
@@ -395,7 +404,7 @@ def get_or_create_food(food_name, llm_calories):
 
     if food_row:
         food_id, canonical_calories = food_row[0], food_row[1]
-        print(f"Found existing food '{food_name}' (ID: {food_id}) with {canonical_calories} calories.")
+        logger.debug("Found existing food '%s' (ID: %s) with %s calories.", food_name, food_id, canonical_calories)
     else:
         try:
             calories_to_insert = int(llm_calories) if llm_calories is not None else 0
@@ -405,7 +414,7 @@ def get_or_create_food(food_name, llm_calories):
         cursor.execute("INSERT INTO foods (name, calories) VALUES (?, ?)", (food_name, calories_to_insert))
         food_id = cursor.lastrowid
         canonical_calories = calories_to_insert
-        print(f"Created new food '{food_name}' (ID: {food_id}) with {canonical_calories} calories.")
+        logger.debug("Created new food '%s' (ID: %s) with %s calories.", food_name, food_id, canonical_calories)
 
     conn.commit()
     conn.close()
@@ -418,14 +427,14 @@ def handle_meal_clarification(data):
     valid_meals = ["breakfast", "lunch", "dinner", "snack"]
 
     if meal_clarification not in valid_meals:
-        print(f"Invalid meal clarification: '{meal_clarification}'. Cancelling log.")
+        logger.warning("Invalid meal clarification: '%s'. Cancelling log.", meal_clarification)
         return jsonify({
             'status': 'error',
             'action': 'log_cancelled',
             'response_text': f"'{meal_clarification}' is not a valid meal. Please try logging again."
         })
 
-    print(f"Meal clarified to '{meal_clarification}'.")
+    logger.info("Meal clarified to '%s'.", meal_clarification)
     details['meal'] = meal_clarification
     # The meal is now clarified, proceed to the next step
     return perform_readback_or_confirmation(details)
@@ -465,10 +474,9 @@ def handle_initial_prompt(data):
 
         if not is_actionable:
             # The response was conversational text or non-actionable JSON.
-            print(f"Gemini response: '{response_data}'")
+            logger.debug("Gemini response: '%s'", response_data)
             return jsonify({'status': 'success', 'action': 'ai_response', 'response_text': str(response_data)})
 
-        # --- Process Actionable Log Request ---
         details = response_data.get('details', {})
         food_name = details.get('food')
         if not food_name:
@@ -486,7 +494,7 @@ def handle_initial_prompt(data):
         meal = details.get('meal')
         valid_meals = ["breakfast", "lunch", "dinner", "snack"]
         if not meal or str(meal).lower().strip() not in valid_meals:
-            print(f"Meal is missing or invalid ('{meal}') for food '{food_name}'. Asking for clarification.")
+            logger.warning("Meal is missing or invalid ('%s') for food '%s'. Asking for clarification.", meal, food_name)
             return jsonify({
                 'status': 'success',
                 'action': 'meal_clarification_required',
@@ -497,10 +505,10 @@ def handle_initial_prompt(data):
         return perform_readback_or_confirmation(details)
 
     except sqlite3.Error as e:
-        print(f"DATABASE ERROR during initial prompt: {e}")
+        logger.error("DATABASE ERROR during initial prompt", exc_info=e)
         return jsonify({'error': 'A database error occurred.'}), 500
     except Exception as e: # Catch-all for other unexpected errors, including from the API call
-        print(f"An unexpected error occurred in handle_initial_prompt: {e}")
+        logger.error("An unexpected error occurred in handle_initial_prompt", exc_info=e)
         return jsonify({'status': 'error', 'message': 'An unexpected error occurred.'}), 500
 
 @app.route('/api/prompt', methods=['POST'])
@@ -513,15 +521,15 @@ def handle_prompt():
     # Route to the correct handler based on the request payload
     if 'text' in data:
         prompt_text = data.get('text')
-        print(f"Received initial prompt: '{prompt_text.strip()}'")
+        logger.debug("Received initial prompt: '%s'", prompt_text.strip())
         return handle_initial_prompt(data)
 
     if data.get('action') == 'confirm_log' and 'details' in data:
-        print("Received confirmation to log.")
+        logger.debug("Received confirmation to log.")
         return handle_confirmed_log(data)
 
     if data.get('action') == 'clarify_meal' and 'details' in data and 'meal' in data:
-        print("Received meal clarification.")
+        logger.debug("Received meal clarification.")
         return handle_meal_clarification(data)
 
     return jsonify({'error': 'Invalid request payload'}), 400
@@ -548,7 +556,7 @@ def update_food_entry(food_id):
         conn.close()
         return jsonify({'status': 'success', 'message': f'Food entry {food_id} updated.'})
     except sqlite3.Error as e:
-        print(f"DATABASE ERROR on food UPDATE: {e}")
+        logger.error("DATABASE ERROR on food UPDATE", exc_info=e)
         return jsonify({'error': 'Could not update food entry.'}), 500
 
 def _validate_update_log_request(meal_date, request_data) -> tuple[str | None, int | None]:
@@ -611,7 +619,7 @@ def update_log_entry(meal_date, log_id):
             # The 'with' statement handles the commit on success or rollback on error.
 
     except sqlite3.Error as e:
-        print(f"DATABASE ERROR on UPDATE: {e}")
+        logger.error("DATABASE ERROR on UPDATE", exc_info=e)
         return jsonify({'error': 'Could not update log entry.'}), 500
 
     return jsonify({'status': 'success', 'message': f'Log entry {log_id} updated.'})
@@ -641,7 +649,7 @@ def delete_log_entry(meal_date, log_id):
         conn.commit()
         return jsonify({'status': 'success', 'message': f'Log entry {log_id} deleted.'})
     except sqlite3.Error as e:
-        print(f"DATABASE ERROR on DELETE: {e}")
+        logger.error("DATABASE ERROR on DELETE", exc_info=e)
         return jsonify({'error': 'Could not delete log entry.'}), 500
     finally:
         if conn:
