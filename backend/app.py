@@ -90,8 +90,10 @@ def handle_initial_prompt(data):
 
     system_instruction = """
     You are a meal logging assistant. Your primary function is to identify when a user wants to log a meal.
-    If the user's request is to log a food item for a specific meal (e.g., "log eggs for breakfast", "I ate 2 sandwiches for lunch"), respond ONLY with a JSON object in the following format:
+    If the user's request is to log a food item, respond ONLY with a JSON object in the following format:
     {"action": "log_meal", "details": {"food": "...", "meal": "...", "quantity": ..., "calories": ...}}
+
+    The "meal" field MUST be one of "breakfast", "lunch", "dinner", or "snack". If the user does not specify a valid meal, set the "meal" field to null. Do not guess a meal or use values like "other".
 
     Also, estimate the calories for a SINGLE UNIT of the food item and include it in the "calories" field as a number. For example, for "2 eggs", provide the calories for one egg.
 
@@ -132,9 +134,12 @@ def handle_initial_prompt(data):
                 
                 details['quantity'] = quantity
 
+                valid_meals = ["breakfast", "lunch", "dinner", "snack"]
+
                 # --- MEAL CHECK ---
-                if not meal:
-                    print(f"Meal is missing for food '{food}'. Asking for clarification.")
+                # Check if meal is missing OR not one of the valid options
+                if not meal or str(meal).lower().strip() not in valid_meals:
+                    print(f"Meal is missing or invalid ('{meal}') for food '{food}'. Asking for clarification.")
                     return jsonify({
                         'status': 'success',
                         'action': 'meal_clarification_required',
@@ -142,7 +147,7 @@ def handle_initial_prompt(data):
                         'response_text': f"Which meal was the {food} for? (e.g., breakfast, lunch, dinner, snack)"
                     })
                 
-                # If meal is present, proceed to readback/confirmation
+                # If meal is present and valid, proceed to readback/confirmation
                 return perform_readback_or_confirmation(details)
 
         except (json.JSONDecodeError, AttributeError):
