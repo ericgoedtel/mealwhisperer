@@ -605,7 +605,7 @@ onBeforeUnmount(() => {
 /* Hide the number input spinners for a cleaner look */
 .qty-input::-webkit-outer-spin-button,
 .qty-input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
-.qty-input[type=number] { -moz-appearance: textfield; }
+.qty-input[type=number] { -moz-appearance: textfield; appearance: textfield; }
 .col-food { background-color: #e8f6f3; padding: 5px; border-radius: 4px; }
 .food-name-clickable {
   cursor: pointer;

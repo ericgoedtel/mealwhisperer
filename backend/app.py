@@ -1,6 +1,11 @@
 # pylint: disable=C0301
 
 """
+This module provides a Flask API for a meal logging application.
+It interfaces with the Google Gemini AI to process natural language prompts,
+and persists meal data in a local SQLite database.
+"""
+"""
 This module interfaces a human with a generative AI for the purposes
 of logging nutrition and meals.
 """
@@ -369,100 +374,6 @@ def handle_confirmed_log(data):
         'response_text': f"Done. I've logged {quantity} {food} for {meal}{calorie_text}."
     })
 
-def handle_initial_prompt(data):
-    """Handles the initial text prompt from the user by calling the AI."""
-    if not data or 'text' not in data:
-        return jsonify({'error': 'No text provided'}), 400
-
-    prompt_text = data['text'].strip()
-
-    try:
-        model = genai.GenerativeModel(
-            GEMINI_MODEL_NAME,
-            system_instruction=SYSTEM_INSTRUCTION
-        )
-        response = model.generate_content(prompt_text)
-
-        # Attempt to parse the response as JSON to detect the structured command
-        try:
-            raw_text = response.text
-            # Clean potential markdown fences from the response
-            if raw_text.strip().startswith("```json"):
-                # Strips ```json from the start and ``` from the end
-                cleaned_text = raw_text.strip()[7:-3].strip()
-            else:
-                cleaned_text = raw_text.strip()
-
-            response_data = json.loads(cleaned_text)
-            if response_data.get('action') == 'log_meal':
-                details = response_data.get('details', {})
-                food = details.get('food', 'unknown')
-
-                # --- Canonical Food Logic ---
-                conn = sqlite3.connect(DB_FILE)
-                cursor = conn.cursor()
-                cursor.execute("SELECT id, calories FROM foods WHERE name = ?", (food,))
-                food_row = cursor.fetchone()
-
-                if food_row:
-                    # Food exists, use its canonical data
-                    food_id = food_row[0]
-                    canonical_calories = food_row[1]
-                    print(f"Found existing food '{food}' (ID: {food_id}) with {canonical_calories} calories.")
-                else:
-                    # Food does not exist, insert it using the LLM's estimate
-                    llm_calories = details.get('calories')
-                    try:
-                        calories_to_insert = int(llm_calories) if llm_calories is not None else 0
-                    except (ValueError, TypeError):
-                        calories_to_insert = 0 # Default to 0 if LLM gives non-numeric calorie value
-
-                    cursor.execute("INSERT INTO foods (name, calories) VALUES (?, ?)", (food, calories_to_insert))
-                    food_id = cursor.lastrowid
-                    canonical_calories = calories_to_insert
-                    print(f"Created new food '{food}' (ID: {food_id}) with {canonical_calories} calories.")
-                conn.commit()
-                conn.close()
-
-                details['food_id'] = food_id
-                details['calories'] = canonical_calories # Overwrite LLM calories with our canonical value
-
-                meal = details.get('meal') # Use default None to correctly trigger the check below
-                date_keyword = details.get('date_keyword')
-                quantity = details.get('quantity')
-                if quantity is None:
-                    quantity = 1
-
-                # Resolve the date keyword into a concrete date string using our reliable Python function.
-                meal_date_str = resolve_meal_date(date_keyword)
-                details['meal_date'] = meal_date_str
-
-                details['quantity'] = quantity
-
-                valid_meals = ["breakfast", "lunch", "dinner", "snack"]
-
-                # --- MEAL CHECK ---
-                # Check if meal is missing OR not one of the valid options
-                if not meal or str(meal).lower().strip() not in valid_meals:
-                    print(f"Meal is missing or invalid ('{meal}') for food '{food}'. Asking for clarification.")
-                    return jsonify({
-                        'status': 'success',
-                        'action': 'meal_clarification_required',
-                        'details': details,
-                        'response_text': f"Which meal was the {food} for? (e.g., breakfast, lunch, dinner, snack)"
-                    })
-
-                # If meal is present and valid, proceed to readback/confirmation
-                return perform_readback_or_confirmation(details)
-
-        except (json.JSONDecodeError, AttributeError):
-            # If it's not our specific JSON, treat it as a standard text response
-            print(f"Gemini response: '{response.text}'")
-            return jsonify({'status': 'success', 'action': 'ai_response', 'response_text': response.text})
-    except Exception as e:
-        print(f"Error calling Gemini API: {e}")
-        return jsonify({'status': 'error', 'message': 'An error occurred while processing your request.'}), 500
-
 def resolve_meal_date(date_keyword: str) -> str:
     """
     Resolves a date keyword from the LLM into a YYYY-MM-DD string.
@@ -478,6 +389,31 @@ def resolve_meal_date(date_keyword: str) -> str:
     # For now, if we don't recognize the keyword, we default to today.
     print(f"Unrecognized date_keyword: '{date_keyword}'. Defaulting to today.")
     return today.isoformat()
+
+def get_or_create_food(food_name, llm_calories):
+    """Finds a food by name or creates it if it doesn't exist. Returns (food_id, canonical_calories)."""
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, calories FROM foods WHERE name = ?", (food_name,))
+    food_row = cursor.fetchone()
+
+    if food_row:
+        food_id, canonical_calories = food_row[0], food_row[1]
+        print(f"Found existing food '{food_name}' (ID: {food_id}) with {canonical_calories} calories.")
+    else:
+        try:
+            calories_to_insert = int(llm_calories) if llm_calories is not None else 0
+        except (ValueError, TypeError):
+            calories_to_insert = 0 # Default to 0 if LLM gives non-numeric calorie value
+
+        cursor.execute("INSERT INTO foods (name, calories) VALUES (?, ?)", (food_name, calories_to_insert))
+        food_id = cursor.lastrowid
+        canonical_calories = calories_to_insert
+        print(f"Created new food '{food_name}' (ID: {food_id}) with {canonical_calories} calories.")
+
+    conn.commit()
+    conn.close()
+    return food_id, canonical_calories
 
 def handle_meal_clarification(data):
     """Handles the user's response to a meal clarification prompt."""
@@ -497,6 +433,79 @@ def handle_meal_clarification(data):
     details['meal'] = meal_clarification
     # The meal is now clarified, proceed to the next step
     return perform_readback_or_confirmation(details)
+
+def _call_llm_and_parse_json(prompt_text, system_instruction):
+    """
+    Calls the Gemini API and parses the JSON response.
+    Returns a tuple: (parsed_data, is_actionable_json).
+    Raises exceptions for API or parsing failures.
+    """
+    model = genai.GenerativeModel(GEMINI_MODEL_NAME, system_instruction=system_instruction)
+    response = model.generate_content(prompt_text)
+
+    raw_text = response.text
+    if raw_text.strip().startswith("```json"):
+        cleaned_text = raw_text.strip()[7:-3].strip()
+    else:
+        cleaned_text = raw_text.strip()
+
+    try:
+        response_data = json.loads(cleaned_text)
+        is_actionable = response_data.get('action') == 'log_meal'
+        return response_data, is_actionable
+    except (json.JSONDecodeError, AttributeError):
+        # Not valid JSON or doesn't have the expected structure, treat as conversational.
+        return raw_text, False
+
+def handle_initial_prompt(data):
+    """Handles the initial text prompt from the user by calling the AI."""
+    if not data or 'text' not in data:
+        return jsonify({'error': 'No text provided'}), 400
+
+    prompt_text = data['text'].strip()
+
+    try:
+        response_data, is_actionable = _call_llm_and_parse_json(prompt_text, SYSTEM_INSTRUCTION)
+
+        if not is_actionable:
+            # The response was conversational text or non-actionable JSON.
+            print(f"Gemini response: '{response_data}'")
+            return jsonify({'status': 'success', 'action': 'ai_response', 'response_text': str(response_data)})
+
+        # --- Process Actionable Log Request ---
+        details = response_data.get('details', {})
+        food_name = details.get('food')
+        if not food_name:
+            return jsonify({'error': 'AI response missing food name.'}), 400
+
+        food_id, canonical_calories = get_or_create_food(food_name, details.get('calories'))
+        details.update({
+            'food_id': food_id,
+            'calories': canonical_calories,
+            'meal_date': resolve_meal_date(details.get('date_keyword')),
+            'quantity': details.get('quantity') or 1
+        })
+
+        # --- Meal Type Validation ---
+        meal = details.get('meal')
+        valid_meals = ["breakfast", "lunch", "dinner", "snack"]
+        if not meal or str(meal).lower().strip() not in valid_meals:
+            print(f"Meal is missing or invalid ('{meal}') for food '{food_name}'. Asking for clarification.")
+            return jsonify({
+                'status': 'success',
+                'action': 'meal_clarification_required',
+                'details': details,
+                'response_text': f"Which meal was the {food_name} for? (e.g., breakfast, lunch, dinner, snack)"
+            })
+
+        return perform_readback_or_confirmation(details)
+
+    except sqlite3.Error as e:
+        print(f"DATABASE ERROR during initial prompt: {e}")
+        return jsonify({'error': 'A database error occurred.'}), 500
+    except Exception as e: # Catch-all for other unexpected errors, including from the API call
+        print(f"An unexpected error occurred in handle_initial_prompt: {e}")
+        return jsonify({'status': 'error', 'message': 'An unexpected error occurred.'}), 500
 
 @app.route('/api/prompt', methods=['POST'])
 def handle_prompt():
@@ -531,7 +540,7 @@ def update_food_entry(food_id):
     try:
         new_calories = int(data['calories'])
         if not 0 <= new_calories <= 5000: # A reasonable limit for per-item calories
-            return jsonify({'error': 'Calories must be between 0 and 5000.'}), 400
+            return jsonify({'error': 'Calories must be between 0 and 5000.'}), 400 # pylint: disable=R1705
     except (ValueError, TypeError):
         return jsonify({'error': 'Invalid calories format.'}), 400
 
