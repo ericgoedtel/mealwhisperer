@@ -5,10 +5,6 @@ This module provides a Flask API for a meal logging application.
 It interfaces with the Google Gemini AI to process natural language prompts,
 and persists meal data in a local SQLite database.
 """
-"""
-This module interfaces a human with a generative AI for the purposes
-of logging nutrition and meals.
-"""
 
 import json
 import os
