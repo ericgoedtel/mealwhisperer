@@ -56,7 +56,7 @@ def handle_initial_prompt(data):
     If the quantity is ambiguous or seems like a transcription error (e.g., '5 817 eggs'), choose the most plausible number that modifies the food item.
     If no quantity is mentioned, you can omit the field as the system will default to 1.
 
-    Do not add any other text, explanation, or markdown formatting around the JSON.
+    Your response for a log_meal action MUST be ONLY the raw JSON object itself, with no surrounding text, explanation, or markdown code fences (like ```json).
 
     If the user's request is anything else (e.g., a question, a greeting, a general command), respond conversationally as a helpful assistant.
     """
@@ -69,7 +69,15 @@ def handle_initial_prompt(data):
 
         # Attempt to parse the response as JSON to detect the structured command
         try:
-            response_data = json.loads(response.text)
+            raw_text = response.text
+            # Clean potential markdown fences from the response
+            if raw_text.strip().startswith("```json"):
+                # Strips ```json from the start and ``` from the end
+                cleaned_text = raw_text.strip()[7:-3].strip()
+            else:
+                cleaned_text = raw_text.strip()
+
+            response_data = json.loads(cleaned_text)
             if response_data.get('action') == 'log_meal':
                 details = response_data.get('details', {})
                 food = details.get('food', 'unknown')
