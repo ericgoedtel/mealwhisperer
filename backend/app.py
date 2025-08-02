@@ -180,7 +180,7 @@ def get_logs_for_date(meal_date):
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT meal, food, quantity, total_calories FROM meal_logs WHERE meal_date = ? ORDER BY log_timestamp",
+            "SELECT id, meal, food, quantity, total_calories FROM meal_logs WHERE meal_date = ? ORDER BY log_timestamp",
             (meal_date,)
         )
         rows = cursor.fetchall()
@@ -418,6 +418,53 @@ def handle_prompt():
         return handle_meal_clarification(data)
 
     return jsonify({'error': 'Invalid request payload'}), 400
+
+@app.route('/api/logs/<string:meal_date>/entry/<int:log_id>', methods=['PATCH'])
+def update_log_entry(meal_date, log_id):
+    """Updates a specific log entry, such as its quantity."""
+    try:
+        # Validate that the provided string is a valid date in YYYY-MM-DD format
+        date.fromisoformat(meal_date)
+    except (ValueError, TypeError):
+        return jsonify({'error': 'Invalid date format in URL. Use YYYY-MM-DD.'}), 400
+
+    data = request.get_json()
+    if not data or 'quantity' not in data:
+        return jsonify({'error': 'Missing quantity in request body.'}), 400
+
+    try:
+        new_quantity = int(data['quantity'])
+        if not (1 <= new_quantity <= 100): # A reasonable limit
+            return jsonify({'error': 'Quantity must be between 1 and 100.'}), 400
+    except (ValueError, TypeError):
+        return jsonify({'error': 'Invalid quantity format.'}), 400
+
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+
+        # First, fetch the existing entry to get calorie info and validate the date
+        cursor.execute("SELECT quantity, total_calories, meal_date FROM meal_logs WHERE id = ?", (log_id,))
+        entry = cursor.fetchone()
+
+        if not entry:
+            return jsonify({'error': 'Log entry not found.'}), 404
+        if entry['meal_date'] != meal_date:
+            return jsonify({'error': 'Log entry does not belong to the specified date.'}), 400
+
+        # Calculate new total calories if possible
+        new_total_calories = round((entry['total_calories'] / entry['quantity']) * new_quantity) if entry['total_calories'] and entry['quantity'] > 0 else None
+        
+        cursor.execute("UPDATE meal_logs SET quantity = ?, total_calories = ? WHERE id = ?", (new_quantity, new_total_calories, log_id))
+        conn.commit()
+        return jsonify({'status': 'success', 'message': f'Log entry {log_id} updated.'})
+    except sqlite3.Error as e:
+        print(f"DATABASE ERROR on UPDATE: {e}")
+        return jsonify({'error': 'Could not update log entry.'}), 500
+    finally:
+        if conn:
+            conn.close()
 
 if __name__ == '__main__':
     init_db()
