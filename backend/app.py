@@ -17,6 +17,9 @@ from dotenv import load_dotenv
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 
+# Load environment variables from .env file before anything else
+load_dotenv()
+
 LOG_LEVEL_STR = os.getenv('LOG_LEVEL', 'INFO').upper()
 LOG_LEVEL = getattr(logging, LOG_LEVEL_STR, logging.INFO)
 
@@ -27,8 +30,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 logger.info("Logging level set to %s", LOG_LEVEL_STR)
-
-load_dotenv()
 
 DB_FILE = 'meals.db'
 
@@ -117,7 +118,6 @@ def _run_migration_v4(cursor):
         # Rebuild meal_logs table to reference the new foods table.
         # This approach is safe for an empty database as per the user's context.
         cursor.execute("PRAGMA foreign_keys=off")
-        cursor.execute("BEGIN TRANSACTION")
 
         cursor.execute('''
             CREATE TABLE meal_logs_v4 (
@@ -133,12 +133,10 @@ def _run_migration_v4(cursor):
         ''')
         cursor.execute("DROP TABLE meal_logs")
         cursor.execute("ALTER TABLE meal_logs_v4 RENAME TO meal_logs")
-        cursor.execute("COMMIT")
         cursor.execute("PRAGMA foreign_keys=on")
         logger.info("Migration v4: Rebuilt 'meal_logs' table with 'food_id' foreign key.")
     except sqlite3.Error as e:
         logger.error("Error applying migration v4", exc_info=e)
-        cursor.execute("ROLLBACK")
         raise
 
 def init_db():
@@ -655,6 +653,8 @@ def delete_log_entry(meal_date, log_id):
         if conn:
             conn.close()
 
+# Initialize the database when the application module is loaded.
+init_db()
+
 if __name__ == '__main__':
-    init_db()
     app.run(debug=True)
